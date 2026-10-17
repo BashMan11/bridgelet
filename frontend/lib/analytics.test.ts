@@ -16,9 +16,11 @@ import {
   getAnonymousId,
   getSessionId,
   isDoNotTrackEnabled,
+  track,
   type ClaimFailedErrorType,
   type ExplorerJourney,
   type ExplorerSourceScreen,
+  type PaymentCreationFailedProps,
   VALID_EXPIRY_WINDOWS,
   type ValidationError,
 } from '@/lib/analytics';
@@ -928,6 +930,90 @@ describe('post-claim events (§5.3–§5.4)', () => {
       }),
     ).not.toThrow();
     expect(plausible).not.toHaveBeenCalled();
+  });
+});
+
+describe('analytics.paymentCreationFailed (§4.3)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    delete (window as unknown as { plausible?: unknown }).plausible;
+  });
+
+  const mockPlausible = () =>
+    ((window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible =
+      plausibleMock());
+
+  const latest = () =>
+    (window as unknown as { plausible: ReturnType<typeof plausibleMock> }).plausible.mock
+      .calls[0]!;
+
+  it('emits Payment Creation Failed with default unknown error_code and sender journey', () => {
+    mockPlausible();
+    analytics.paymentCreationFailed();
+
+    const call = latest();
+    expect(call[0]).toBe('Payment Creation Failed');
+    expect(call[1].props).toEqual(
+      expect.objectContaining({
+        journey: 'sender',
+        error_code: 'unknown',
+      }),
+    );
+  });
+
+  it('emits Payment Creation Failed with asset_type and error_code', () => {
+    mockPlausible();
+    analytics.paymentCreationFailed({
+      assetType: 'USDC',
+      errorCode: 'SUBMIT_FAILED',
+    });
+
+    const call = latest();
+    expect(call[0]).toBe('Payment Creation Failed');
+    expect(call[1].props).toEqual(
+      expect.objectContaining({
+        journey: 'sender',
+        asset_type: 'USDC',
+        error_code: 'SUBMIT_FAILED',
+      }),
+    );
+  });
+
+  it('omits asset_type when not provided', () => {
+    mockPlausible();
+    analytics.paymentCreationFailed({
+      errorCode: 'STELLAR_CREATION_FAILURE',
+    });
+
+    const call = latest();
+    expect(call[0]).toBe('Payment Creation Failed');
+    expect(call[1].props).toEqual(
+      expect.objectContaining({
+        journey: 'sender',
+        error_code: 'STELLAR_CREATION_FAILURE',
+      }),
+    );
+    expect(call[1].props).not.toHaveProperty('asset_type');
+  });
+
+  it('allows direct track() call for Payment Creation Failed', () => {
+    mockPlausible();
+    track('Payment Creation Failed', {
+      journey: 'sender',
+      asset_type: 'XLM',
+      error_code: 'op_underfunded',
+    });
+
+    const call = latest();
+    expect(call[0]).toBe('Payment Creation Failed');
+    expect(call[1].props).toEqual(
+      expect.objectContaining({
+        journey: 'sender',
+        asset_type: 'XLM',
+        error_code: 'op_underfunded',
+      }),
+    );
   });
 });
 

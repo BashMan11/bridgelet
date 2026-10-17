@@ -223,6 +223,10 @@ export function ConfirmStep({ state, onBack }: ConfirmStepProps) {
       setRetryCount(attempt);
       setSubmitPhase('idle');
       submitGuardRef.current = false;
+      analytics.paymentCreationFailed({
+        assetType: state.assetCode,
+        errorCode: (err instanceof FundingError ? err.code : info.code) || 'unknown',
+      });
     }
   }
 
