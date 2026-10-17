@@ -1,9 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import type { SendFormState } from '../index';
 import { ChainSelector } from '../../chain-selector';
-import { getXlmUsdRate, formatFiat } from '@/lib/xlm-price';
+import { formatFiat } from '@/lib/xlm-price';
 import { isAssetAvailable, supportedAssetCodes } from '@/lib/bridgelet';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -37,28 +37,21 @@ export function validateDetails(state: SendFormState): FieldErrors {
 
 type DetailsStepProps = {
   state: SendFormState;
+  /** Live XLM/USD rate, fetched once by the parent form. `null` while loading. */
+  usdRate: number | null;
   onChange: (patch: Partial<SendFormState>) => void;
   onBack: () => void;
   onNext: () => void;
 };
 
-export function DetailsStep({ state, onChange, onBack, onNext }: DetailsStepProps) {
+export function DetailsStep({ state, usdRate, onChange, onBack, onNext }: DetailsStepProps) {
   const [validationError, setValidationError] = useState<string | null>(null);
   const [selectedChain, setSelectedChain] = useState<string>('stellar');
-  const [usdRate, setUsdRate] = useState<number | null>(null);
   const errors = validateDetails(state);
   // Issued assets are only offered when an issuer is configured for the active
   // network; otherwise offer them disabled with an explanatory hint.
   const availableAssets = supportedAssetCodes();
   const usdcAvailable = isAssetAvailable('USDC');
-
-  useEffect(() => {
-    let active = true;
-    getXlmUsdRate().then((rate) => {
-      if (active) setUsdRate(rate);
-    });
-    return () => { active = false; };
-  }, []);
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();

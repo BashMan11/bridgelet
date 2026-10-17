@@ -137,8 +137,8 @@ These properties are included only where relevant and marked `(if available)` in
 |----------|------|-------------|
 | `claim_id` | string | Unique ID for the claim/payment |
 | `asset_type` | string | `"XLM"`, `"USDC"`, etc. |
-| `amount_usd_equiv` | number | USD equivalent at time of event |
-| `expiry_days` | number | `1`, `7`, `30`, `90`, or `null` (never) |
+| `amount_usd_equiv` | number | USD equivalent at time of event. Omitted entirely when the price is unavailable — never `0` |
+| `expiry_days` | number | `1`, `3`, `7`, `30`, `90`, or `null` (never). `3` is the 72-hour window the send form offers |
 | `error_code` | string | Machine-readable error identifier |
 | `error_type` | string | Category of error (see §6) |
 
@@ -239,7 +239,8 @@ Fired when the sender successfully connects their wallet.
 | Property | Type | Value / Description |
 |----------|------|---------------------|
 | `journey` | string | `"sender"` |
-| `wallet_type` | string | Name of the wallet provider (e.g., `"Freighter"`, `"Albedo"`, `"xBull"`) |
+| `wallet_provider` | string | Closed set: `"freighter"`, `"lobstr"`, `"generated"`, `"unknown"` |
+| `wallet_type` | string | Display name of the provider (e.g., `"Freighter"`). Retained for readability; group by `wallet_provider` instead |
 
 ---
 
@@ -250,8 +251,20 @@ Fired when wallet connection is attempted but fails.
 | Property | Type | Value / Description |
 |----------|------|---------------------|
 | `journey` | string | `"sender"` |
-| `wallet_type` | string | Attempted wallet provider |
-| `error_code` | string | Provider error code or `"unknown"` |
+| `wallet_provider` | string | Closed set: `"freighter"`, `"lobstr"`, `"generated"`, `"unknown"` |
+| `wallet_type` | string | Display name of the attempted provider. Retained for readability; group by `wallet_provider` instead |
+| `error_code` | string | Provider error code, or `"unknown"` |
+
+`wallet_provider` names the provider that was *attempted*, which is known even
+when the failure happened before it responded — a missing extension and a
+declined permission prompt are both `"freighter"` here. Connection failure rate
+is expected to differ sharply by provider (a version-pinned extension release
+shows up as a `freighter`-only spike), so this is a first-class dimension
+rather than free text.
+
+`error_code` distinguishes the failure modes: `"FREIGHTER_NOT_INSTALLED"`,
+`"CONNECTION_DENIED"` (the user dismissed the prompt), `"NO_ADDRESS_RETURNED"`,
+or `"UNKNOWN"`.
 
 ---
 
@@ -263,8 +276,10 @@ Fired when the sender clicks "Confirm & Pay" and signs the transaction. This ind
 |----------|------|---------------------|
 | `journey` | string | `"sender"` |
 | `asset_type` | string | |
+| `amount_usd_equiv` | number | Omitted when the price is unavailable — never sent as `0` |
 | `expiry_days` | number \| null | |
-| `wallet_type` | string | |
+| `wallet_provider` | string | Closed set: `"freighter"`, `"lobstr"`, `"generated"`, `"unknown"` |
+| `wallet_type` | string | Display name. Retained for readability; group by `wallet_provider` instead |
 
 ---
 
@@ -429,7 +444,16 @@ Fired when the sender successfully reclaims expired funds.
 | `journey` | string | `"sender"` |
 | `claim_id` | string | |
 | `asset_type` | string | |
-| `days_expired` | number | Days the claim was expired before reclaim |
+| `days_expired` | number | Days the claim was expired before reclaim. `0` for a cancellation reclaim |
+| `reclaim_reason` | string | `"expired"` (the claim window elapsed) or `"cancelled"` (the sender cancelled first) |
+
+`reclaim_reason` is required. A reclaim after expiry and a reclaim after
+cancellation are different user situations: the first usually means the
+recipient never engaged, the second that the sender changed their mind, and
+they warrant different product responses. Without this property both collapse
+into a single "reclaim" number whose composition cannot be recovered.
+
+`days_expired` is only meaningful for `reclaim_reason: "expired"`.
 
 ---
 
@@ -736,6 +760,20 @@ Claim Link Shared        ← activation milestone
 | 5 | `Payment Confirmed` | % who sign the transaction |
 | 6 | `Payment Created` | % confirmed → on-chain success |
 | 7 | `Claim Link Shared` | % who actively share (vs. just copy) |
+
+**Abandonment is measured as absence, not as an event.** A sender who starts
+the form and then closes the tab produces `Send Form Started` and nothing
+further. There is deliberately no "abandoned" or "session timeout" event: the
+drop-off from any stage to the next is `1 - (next stage count / stage count)`
+over the same `session_id`, and an explicit abandonment event would double
+count every real failure that already fires its own event (`Payment Creation
+Failed`, `Claim Failed`) while still missing the tab-closed case.
+
+This applies symmetrically to every stage in this funnel and to §7.2. When
+building a dashboard, compute drop-off from stage counts rather than waiting
+for a negative signal that will never arrive. Do not attribute a drop to a
+failure without checking for the paired failure event first — a session that
+emits `Payment Creation Failed` was already explained by that event.
 
 ---
 

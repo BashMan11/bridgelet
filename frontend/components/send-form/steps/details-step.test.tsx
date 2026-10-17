@@ -39,7 +39,13 @@ describe('DetailsStep (#763)', () => {
   it('advances without an email when the amount is valid', async () => {
     const user = userEvent.setup();
     const onNext = vi.fn();
-    render(<DetailsStep state={makeState({ amountXlm: '5' })} onChange={vi.fn()} onBack={vi.fn()} onNext={onNext} />);
+    render(<DetailsStep
+        state={makeState({ amountXlm: '5' })}
+        usdRate={0.1}
+        onChange={vi.fn()}
+        onBack={vi.fn()}
+        onNext={onNext}
+      />);
 
     await user.click(screen.getByRole('button', { name: /review payment/i }));
 
@@ -53,6 +59,7 @@ describe('DetailsStep (#763)', () => {
     render(
       <DetailsStep
         state={makeState({ amountXlm: '5', recipientEmail: 'nope' })}
+        usdRate={0.1}
         onChange={vi.fn()}
         onBack={vi.fn()}
         onNext={onNext}
@@ -70,7 +77,13 @@ describe('DetailsStep (#763)', () => {
   it('blocks submission when the amount is missing', async () => {
     const user = userEvent.setup();
     const onNext = vi.fn();
-    render(<DetailsStep state={makeState()} onChange={vi.fn()} onBack={vi.fn()} onNext={onNext} />);
+    render(<DetailsStep
+        state={makeState()}
+        usdRate={0.1}
+        onChange={vi.fn()}
+        onBack={vi.fn()}
+        onNext={onNext}
+      />);
 
     await user.click(screen.getByRole('button', { name: /review payment/i }));
 
@@ -86,6 +99,7 @@ describe('DetailsStep (#763)', () => {
     render(
       <DetailsStep
         state={makeState({ amountXlm: '5', recipientEmail: 'amina@example.com' })}
+        usdRate={0.1}
         onChange={vi.fn()}
         onBack={vi.fn()}
         onNext={onNext}
