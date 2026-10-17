@@ -10,6 +10,26 @@ This document outlines the development timeline, planned features, and community
 
 We are currently focused on delivering the Minimum Viable Product (MVP) which allows for the basic lifecycle of a Bridgelet account: creation, funding, and claiming (sweeping).
 
+## Tracked Workstreams
+
+### Analytics instrumentation (frontend + mobile)
+
+The product is a financial flow whose success is invisible without telemetry,
+so this is a first-class workstream rather than a documentation detail.
+`docs/analytics-spec.md` defines 34 events plus a mobile extension (§10) and a
+§3.1 base payload; `docs/analytics-kpi-definitions.md` tracks, per KPI,
+whether its constituent events actually fire.
+
+- [x] Base payload implemented end to end (`frontend/lib/analytics.ts`)
+- [x] Sender journey instrumentation (events, conditional properties, §6 error types)
+- [x] Recipient journey instrumentation (events, entry channels, error classification)
+- [x] Mobile sink, base payload and screen tracking
+- [x] KPI query definitions with per-KPI readiness status
+- [ ] **Decide the analytics provider (§9.1)** — blocks volume testing and dashboard build
+- [ ] Consent UI exposing the opt-out gate (the gate exists; nothing surfaces it to a user yet)
+- [ ] Dashboard layer built against the KPI definitions, with `Payment Created` as the success criterion
+- [ ] Volume and failure testing against a staging ingest endpoint (`docs/analytics-load-testing.md`)
+
 ## 2026 Timeline
 
 ### Q1 2026: MVP Completion 🏁

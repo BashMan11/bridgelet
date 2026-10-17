@@ -156,6 +156,41 @@ Bridgelet's non-custodial architecture means:
 
 Integrators should consult legal counsel regarding their specific use case and jurisdiction.
 
+### What data does Bridgelet collect or track?
+
+Bridgelet's own reference apps record **product analytics** — which flows get
+used and where they break — and deliberately record as little as possible about
+who is using them.
+
+**What is recorded.** Aggregate interaction events (for example "a recipient
+opened a claim link" or "a sender completed a payment") with a base payload
+containing an anonymous, randomly generated identifier, a per-visit session
+identifier, a coarse device type, the app version, and whether the traffic is
+mainnet or testnet. Events can carry a claim/payment identifier and an amount,
+so that conversion and failure rates can be computed at all.
+
+**What is not recorded.** No wallet addresses, no claim tokens, no message
+contents, no names or email addresses, and no keys of any kind. Claim links are
+not forwarded to third parties, and the claim page deliberately loads no
+third-party script or asset.
+
+**How it is kept private.**
+
+- The anonymous identifier is a random UUID, not derived from anything about
+  you, and you can reset it by clearing your browser storage.
+- If your browser sends a **Do Not Track** signal, no events are recorded and
+  no identifier is created at all.
+- There is an explicit opt-out that stops all recording, independent of your
+  browser settings.
+- Nothing is used for advertising, profiling or sale.
+
+**One honest caveat:** because visitors who opt out record nothing, published
+usage rates are a lower bound — they describe the people who did not opt out.
+See `SECURITY.md` for how analytics data is scoped, and
+`docs/analytics-spec.md` §3.1 for the exact fields.
+
+---
+
 ### Who handles recipient data and privacy?
 
 **The SDK generates claim links. The integrator delivers them.**

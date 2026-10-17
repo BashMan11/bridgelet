@@ -21,6 +21,45 @@ Thanks for helping improve Bridgelet! Please read this guide before opening an i
 - Include tests or notes on why tests are not required.
 - Update documentation when behavior or APIs change.
 - Link related issues/discussions and describe the approach and rationale.
+- Adding or changing a tracked analytics event? Read the next section first.
+
+## Adding or Modifying a Tracked Analytics Event
+
+`docs/analytics-spec.md` is the contract for everything the apps report, and
+several parallel branches are instrumenting it right now. Read
+`bridgelet-product-audit/runbooks/review-analytics-spec-before-new-event.md`
+before you write the `track()` call — it exists because the spec and the code
+have already drifted once.
+
+The order that works:
+
+1. **Check the spec first.** The event, its journey and its payload live in
+   `docs/analytics-spec.md` §4–§6. If the event is not there, that is the
+   first thing to change — an event in code but not in the spec is invisible
+   to the drift check in `.github/workflows/analytics-spec-diff.yml` and to
+   anyone reading the spec.
+2. **Change the spec and the code in the same PR.** A spec-only PR describes
+   behaviour nobody emits; a code-only PR ships behaviour nobody documented.
+3. **Name it the way the spec names it.** `Noun Verb` in Title Case, matching
+   the `#### \`Event Name\`` heading exactly. A snake_case name does not match
+   the CI drift check and will fail the build.
+4. **Route every event through the single `track()` dispatch point.** Opt-out
+   (§9.5), deduplication (§9.4) and the §3.1 base payload are enforced there;
+   an emitter that bypasses it silently loses all three.
+5. **Reuse the `conditional.*` helpers** for §3.2 properties rather than
+   re-typing snake_case keys.
+6. **Never send an identifier you would not want in a log**: no addresses, no
+   claim tokens, no message text. §5.2 states this for wallet addresses
+   explicitly.
+7. **Assert it fires.** `frontend/e2e/analytics.spec.ts` is the pattern — an
+   event with no test can be deleted by a later refactor without anything
+   failing.
+8. **Update `docs/analytics-kpi-definitions.md`** if the event is a KPI input
+   or unblocks one; its readiness table is the project's record of what may be
+   reported.
+
+A PR that adds a tracking call should tick the analytics box in the PR
+template.
 
 ## Development Notes
 
