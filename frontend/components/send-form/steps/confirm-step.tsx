@@ -22,7 +22,8 @@ import {
 } from '@/lib/account-errors';
 import { publicEnv } from '@/lib/env';
 import { FundingError, fundEphemeralAccount } from '@/lib/fund-ephemeral-account';
-import { analytics } from '@/lib/analytics';
+import { analytics, toAmountUsdEquiv } from '@/lib/analytics';
+import { getXlmUsdRate } from '@/lib/xlm-price';
 
 /**
  * Default claim window for accounts created from the send form.
@@ -127,14 +128,34 @@ export function ConfirmStep({ state, onBack }: ConfirmStepProps) {
   // Ensures the claim-link email is sent at most once per submission.
   const emailSentRef = useRef(false);
 
+  // Latest XLM/USD rate for the §3.2 `amount_usd_equiv` property. Cached by
+  // `getXlmUsdRate()`, so this normally resolves from the details step's fetch.
+  const xlmUsdRateRef = useRef<number | undefined>(undefined);
+
   const submitting = submitPhase !== 'idle' && submitPhase !== 'success';
+
+  /** §3.2 `amount_usd_equiv` for the amount being sent, when known. */
+  function usdEquiv() {
+    return toAmountUsdEquiv(state.amountXlm, state.assetCode, xlmUsdRateRef.current);
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    void getXlmUsdRate().then((rate) => {
+      if (!cancelled) xlmUsdRateRef.current = rate;
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     analytics.paymentConfirmationViewed({
       assetType: state.assetCode,
+      amountUsdEquiv: toAmountUsdEquiv(state.amountXlm, state.assetCode, xlmUsdRateRef.current),
       expiryDays: state.expiresInHours / 24,
     });
-  }, [state.assetCode, state.expiresInHours]);
+  }, [state.assetCode, state.amountXlm, state.expiresInHours]);
 
   function buildCreateAccountPayload() {
     return {
@@ -208,6 +229,7 @@ export function ConfirmStep({ state, onBack }: ConfirmStepProps) {
       analytics.paymentCreated({
         claimId: account.accountId,
         assetType: state.assetCode,
+        amountUsdEquiv: usdEquiv(),
         expiryDays: state.expiresInHours / 24,
         confirmationTimeMs: confirmedAt.current != null ? Date.now() - confirmedAt.current : 0,
       });
@@ -282,6 +304,7 @@ export function ConfirmStep({ state, onBack }: ConfirmStepProps) {
     confirmedAt.current = Date.now();
     analytics.paymentConfirmed({
       assetType: state.assetCode,
+      amountUsdEquiv: usdEquiv(),
       expiryDays: state.expiresInHours / 24,
       walletType: 'Freighter',
     });

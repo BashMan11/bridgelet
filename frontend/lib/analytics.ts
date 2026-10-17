@@ -64,12 +64,31 @@ export function detectDeviceType(userAgent?: string): DeviceType {
   return 'desktop';
 }
 
+export type AnalyticsNetwork = 'testnet' | 'mainnet';
+
+/**
+ * Stellar network the build is pointed at (`docs/analytics-spec.md` §3.1
+ * `network`), derived from NEXT_PUBLIC_CRYPTO_NETWORK (`stellar-testnet` |
+ * `stellar-mainnet`). Accepts an explicit value for testability.
+ *
+ * Only an explicit mainnet setting reports `mainnet`; anything else —
+ * unset, empty, a typo — reports `testnet`. Dashboards filter on
+ * `network = mainnet` to exclude test traffic, so a misconfigured build
+ * must fail towards being excluded rather than polluting production KPIs.
+ */
+export function detectNetwork(configured?: string): AnalyticsNetwork {
+  const value = (configured ?? process.env.NEXT_PUBLIC_CRYPTO_NETWORK ?? '').trim().toLowerCase();
+  return value === 'stellar-mainnet' || value === 'mainnet' || value === 'public'
+    ? 'mainnet'
+    : 'testnet';
+}
+
 /**
  * Base payload fields (`docs/analytics-spec.md` §3.1) shared by every
- * event: `app_version`, `user_agent`, `device_type`, `referrer`, and the
- * fixed frontend `platform` value "web". Each field degrades gracefully
- * when the browser API it depends on is unavailable (SSR, unit tests
- * without a DOM).
+ * event: `app_version`, `user_agent` (the raw navigator UA string),
+ * `device_type`, `referrer`, `network`, and the fixed frontend `platform`
+ * value "web". Each field degrades gracefully when the browser API it
+ * depends on is unavailable (SSR, unit tests without a DOM).
  */
 export function buildBasePayload(): EventProps {
   return {
@@ -78,6 +97,7 @@ export function buildBasePayload(): EventProps {
     device_type: detectDeviceType(),
     referrer: typeof document !== 'undefined' && document.referrer ? document.referrer : null,
     platform: 'web',
+    network: detectNetwork(),
   };
 }
 
@@ -447,9 +467,72 @@ export const VALID_EXPIRY_WINDOWS = [1, 7, 30, 90] as const;
 
 export type ExpiryDays = (typeof VALID_EXPIRY_WINDOWS)[number] | null;
 
+/**
+ * Normalises an asset identifier to the §3.2 `asset_type` form (`"XLM"`,
+ * `"USDC"`, …) so the Asset Distribution metric (§8.2) never splits one
+ * asset across several spellings. Accepts the backend's `"native"` /
+ * `"CODE:ISSUER"` identifiers (§5.1 mapping) as well as bare codes.
+ * Returns `undefined` for empty input so callers can omit the property.
+ */
+export function normalizeAssetType(asset: string | null | undefined): string | undefined {
+  if (typeof asset !== 'string') return undefined;
+  const code = (asset.split(':')[0] ?? '').trim();
+  if (code === '') return undefined;
+  return code.toLowerCase() === 'native' ? 'XLM' : code.toUpperCase();
+}
+
+/** Assets treated as pegged 1:1 to USD for `amount_usd_equiv`. */
+const USD_PEGGED_ASSETS: readonly string[] = ['USDC'];
+
+/**
+ * USD equivalent of an amount at the time of the event (§3.2
+ * `amount_usd_equiv`), rounded to cents.
+ *
+ * - USD-pegged assets (USDC) convert 1:1 and need no rate.
+ * - XLM converts at `xlmUsdRate` (see `getXlmUsdRate()` in `lib/xlm-price`).
+ * - Anything else, a missing/zero rate, or an unparseable or negative
+ *   amount returns `undefined` — the property is "(if available)", and
+ *   emitting a guessed `0` would silently corrupt volume KPIs.
+ */
+export function toAmountUsdEquiv(
+  amount: number | string | null | undefined,
+  assetType: string | null | undefined,
+  xlmUsdRate?: number | null,
+): number | undefined {
+  const value = typeof amount === 'string' ? Number.parseFloat(amount) : amount;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return undefined;
+
+  const asset = normalizeAssetType(assetType);
+  let usd: number;
+  if (asset && USD_PEGGED_ASSETS.includes(asset)) {
+    usd = value;
+  } else if (asset === 'XLM' && typeof xlmUsdRate === 'number' && xlmUsdRate > 0) {
+    usd = value * xlmUsdRate;
+  } else {
+    return undefined;
+  }
+  return Math.round(usd * 100) / 100;
+}
+
+/**
+ * Spreads the asset-related §3.2 properties (`asset_type`,
+ * `amount_usd_equiv`) for an event, omitting each one that is unavailable.
+ */
+function assetProps(assetType?: string | null, usdEquiv?: number | null): EventProps {
+  const asset = normalizeAssetType(assetType);
+  return {
+    ...(asset ? { asset_type: asset } : {}),
+    ...(typeof usdEquiv === 'number' && Number.isFinite(usdEquiv)
+      ? { amount_usd_equiv: usdEquiv }
+      : {}),
+  };
+}
+
 export const conditional = {
   claimId: (claimId: string): EventProps => ({ claim_id: claimId }),
-  assetType: (assetType: string): EventProps => ({ asset_type: assetType }),
+  assetType: (assetType: string): EventProps => ({
+    asset_type: normalizeAssetType(assetType) ?? assetType,
+  }),
   amountUsdEquiv: (amountUsdEquiv: number): EventProps => ({
     amount_usd_equiv: amountUsdEquiv,
   }),
@@ -461,6 +544,8 @@ export const conditional = {
 interface ClaimVerifiedProps {
   claimId: string;
   assetType?: string;
+  /** §3.2 `amount_usd_equiv`; see `toAmountUsdEquiv()`. Omitted when unknown. */
+  amountUsdEquiv?: number;
   expiryDaysRemaining?: number;
   verificationTimeMs: number;
 }
@@ -468,6 +553,8 @@ interface ClaimVerifiedProps {
 interface ClaimCtaClickedProps {
   claimId: string;
   assetType?: string;
+  /** §3.2 `amount_usd_equiv`; see `toAmountUsdEquiv()`. Omitted when unknown. */
+  amountUsdEquiv?: number;
 }
 
 interface ErrorDisplayedProps {
@@ -514,6 +601,8 @@ export const CLAIM_FAILED_ERROR_TYPES: Record<ClaimFailedErrorType, ClaimFailedE
 interface ClaimFailedProps {
   claimId: string;
   assetType?: string;
+  /** §3.2 `amount_usd_equiv`; see `toAmountUsdEquiv()`. Omitted when unknown. */
+  amountUsdEquiv?: number;
   /** Stellar error code or 'unknown'. */
   errorCode?: string;
   /** §5.3 error_type taxonomy value. */
@@ -525,6 +614,8 @@ interface ClaimFailedProps {
 interface ClaimSuccessViewedProps {
   claimId: string;
   assetType?: string;
+  /** §3.2 `amount_usd_equiv`; see `toAmountUsdEquiv()`. Omitted when unknown. */
+  amountUsdEquiv?: number;
 }
 
 interface SenderSignupCtaClickedProps {
@@ -555,6 +646,8 @@ interface WalletAddressValidationFailedProps {
 interface ClaimSucceededProps {
   claimId: string;
   assetType?: string;
+  /** §3.2 `amount_usd_equiv`; see `toAmountUsdEquiv()`. Omitted when unknown. */
+  amountUsdEquiv?: number;
   /** Hours between `Payment Created` (sender) and `Claim Succeeded` (recipient). */
   timeToClaimHours?: number;
   /** Time in ms from `Claim Submitted` to on-chain confirmation. */
@@ -577,87 +670,95 @@ export const analytics = {
       claim_id: claimId,
       entry_channel: entryChannel,
     }),
-  claimInitiated: ({ claimId, assetType }: { claimId: string; assetType?: string }) =>
+  claimInitiated: ({ claimId, assetType, amountUsdEquiv }: { claimId: string; assetType?: string; amountUsdEquiv?: number }) =>
     track('Claim CTA Clicked', {
       journey: 'recipient',
       claim_id: claimId,
-      ...(assetType ? { asset_type: assetType } : {}),
+      ...assetProps(assetType, amountUsdEquiv),
     }),
-  claimSuccess: ({ claimId, assetType }: { claimId: string; assetType?: string }) =>
+  claimSuccess: ({ claimId, assetType, amountUsdEquiv }: { claimId: string; assetType?: string; amountUsdEquiv?: number }) =>
     track('Claim Succeeded', {
       journey: 'recipient',
       claim_id: claimId,
-      ...(assetType ? { asset_type: assetType } : {}),
+      ...assetProps(assetType, amountUsdEquiv),
     }),
-  claimError: ({ claimId, assetType, errorCode = 'unknown', errorType, attemptNumber }: ClaimFailedProps) =>
+  claimError: ({ claimId, assetType, amountUsdEquiv, errorCode = 'unknown', errorType, attemptNumber }: ClaimFailedProps) =>
     track('Claim Failed', {
       journey: 'recipient',
       claim_id: claimId,
-      ...(assetType ? { asset_type: assetType } : {}),
+      ...assetProps(assetType, amountUsdEquiv),
       error_code: errorCode,
       error_type: errorType,
       attempt_number: attemptNumber,
     }),
   sendFormCompleted: ({
     assetType,
+    amountUsdEquiv,
     expiryDays,
     hasRecipientName,
     hasMessage,
   }: {
     assetType?: string;
+    amountUsdEquiv?: number;
     expiryDays?: number | null;
     hasRecipientName: boolean;
     hasMessage: boolean;
   }) =>
     track('Send Form Completed', {
       journey: 'sender',
-      ...(assetType ? { asset_type: assetType } : {}),
+      ...assetProps(assetType, amountUsdEquiv),
       ...(expiryDays != null ? { expiry_days: expiryDays } : {}),
       has_recipient_name: hasRecipientName,
       has_message: hasMessage,
     }),
   paymentConfirmationViewed: ({
     assetType,
+    amountUsdEquiv,
     expiryDays,
   }: {
     assetType?: string;
+    amountUsdEquiv?: number;
     expiryDays?: number | null;
   }) =>
     track('Payment Confirmation Viewed', {
       journey: 'sender',
-      ...(assetType ? { asset_type: assetType } : {}),
+      ...assetProps(assetType, amountUsdEquiv),
       ...(expiryDays != null ? { expiry_days: expiryDays } : {}),
     }),
   paymentConfirmed: ({
     assetType,
+    amountUsdEquiv,
     expiryDays,
     walletType,
   }: {
     assetType?: string;
+    amountUsdEquiv?: number;
     expiryDays?: number | null;
     walletType?: string;
   }) =>
     track('Payment Confirmed', {
       journey: 'sender',
-      ...(assetType ? { asset_type: assetType } : {}),
+      ...assetProps(assetType, amountUsdEquiv),
       ...(expiryDays != null ? { expiry_days: expiryDays } : {}),
       ...(walletType ? { wallet_type: walletType } : {}),
     }),
   paymentCreated: ({
     claimId,
     assetType,
+    amountUsdEquiv,
     expiryDays,
     confirmationTimeMs,
   }: {
     claimId: string;
     assetType?: string;
+    amountUsdEquiv?: number;
     expiryDays?: number | null;
     confirmationTimeMs: number;
   }) =>
     track('Payment Created', {
       journey: 'sender',
       claim_id: claimId,
-      ...(assetType ? { asset_type: assetType } : {}),
+      ...assetProps(assetType, amountUsdEquiv),
       ...(expiryDays != null ? { expiry_days: expiryDays } : {}),
       confirmation_time_ms: confirmationTimeMs,
     }),
@@ -713,21 +814,22 @@ export const analytics = {
   claimVerified: ({
     claimId,
     assetType,
+    amountUsdEquiv,
     expiryDaysRemaining,
     verificationTimeMs,
   }: ClaimVerifiedProps) =>
     track('Claim Verified', {
       journey: 'recipient',
       ...conditional.claimId(claimId),
-      ...(assetType ? conditional.assetType(assetType) : {}),
+      ...assetProps(assetType, amountUsdEquiv),
       ...(expiryDaysRemaining != null ? { expiry_days_remaining: expiryDaysRemaining } : {}),
       verification_time_ms: verificationTimeMs,
     }),
-  claimCtaClicked: ({ claimId, assetType }: ClaimCtaClickedProps) =>
+  claimCtaClicked: ({ claimId, assetType, amountUsdEquiv }: ClaimCtaClickedProps) =>
     track('Claim CTA Clicked', {
       journey: 'recipient',
       ...conditional.claimId(claimId),
-      ...(assetType ? conditional.assetType(assetType) : {}),
+      ...assetProps(assetType, amountUsdEquiv),
     }),
   errorDisplayed: ({
     journey,
@@ -754,11 +856,11 @@ export const analytics = {
       validation_error: validationError,
       attempt_number: attemptNumber,
     }),
-  claimConfirmationViewed: ({ claimId, assetType }: ClaimCtaClickedProps) =>
+  claimConfirmationViewed: ({ claimId, assetType, amountUsdEquiv }: ClaimCtaClickedProps) =>
     track('Claim Confirmation Viewed', {
       journey: 'recipient',
       claim_id: claimId,
-      ...(assetType ? { asset_type: assetType } : {}),
+      ...assetProps(assetType, amountUsdEquiv),
     }),
 
   /**
@@ -786,6 +888,7 @@ export const analytics = {
   claimFailed: ({
     claimId,
     assetType,
+    amountUsdEquiv,
     errorCode = 'unknown',
     errorType,
     attemptNumber,
@@ -793,7 +896,7 @@ export const analytics = {
     track('Claim Failed', {
       journey: 'recipient',
       claim_id: claimId,
-      ...(assetType ? { asset_type: assetType } : {}),
+      ...assetProps(assetType, amountUsdEquiv),
       error_code: errorCode,
       error_type: errorType,
       attempt_number: attemptNumber,
@@ -802,11 +905,11 @@ export const analytics = {
   /**
    * §5.4 Claim Success Viewed — fires when the post-claim success screen is displayed.
    */
-  claimSuccessViewed: ({ claimId, assetType }: ClaimSuccessViewedProps) =>
+  claimSuccessViewed: ({ claimId, assetType, amountUsdEquiv }: ClaimSuccessViewedProps) =>
     track('Claim Success Viewed', {
       journey: 'recipient',
       claim_id: claimId,
-      ...(assetType ? { asset_type: assetType } : {}),
+      ...assetProps(assetType, amountUsdEquiv),
     }),
 
   /**
@@ -830,15 +933,16 @@ export const analytics = {
       claim_id: claimId,
       source_screen: sourceScreen,
     }),
-  claimSubmitted: ({ claimId, assetType }: ClaimCtaClickedProps) =>
+  claimSubmitted: ({ claimId, assetType, amountUsdEquiv }: ClaimCtaClickedProps) =>
     track('Claim Submitted', {
       journey: 'recipient',
       claim_id: claimId,
-      ...(assetType ? { asset_type: assetType } : {}),
+      ...assetProps(assetType, amountUsdEquiv),
     }),
   claimSucceeded: ({
     claimId,
     assetType,
+    amountUsdEquiv,
     timeToClaimHours,
     sweepDurationMs,
     entryChannel = 'unknown',
@@ -846,7 +950,7 @@ export const analytics = {
     track('Claim Succeeded', {
       journey: 'recipient',
       claim_id: claimId,
-      ...(assetType ? { asset_type: assetType } : {}),
+      ...assetProps(assetType, amountUsdEquiv),
       ...(timeToClaimHours !== undefined ? { time_to_claim_hours: timeToClaimHours } : {}),
       ...(sweepDurationMs !== undefined ? { sweep_duration_ms: sweepDurationMs } : {}),
       entry_channel: entryChannel,

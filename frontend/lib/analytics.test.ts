@@ -11,14 +11,17 @@ import {
   DEDUP_TTL_MS,
   DEDUPLICATED_EVENTS,
   detectDeviceType,
+  detectNetwork,
   ERROR_TYPES,
   ErrorType,
   getAnonymousId,
   getSessionId,
   isDoNotTrackEnabled,
+  normalizeAssetType,
   type ClaimFailedErrorType,
   type ExplorerJourney,
   type ExplorerSourceScreen,
+  toAmountUsdEquiv,
   VALID_EXPIRY_WINDOWS,
   type ValidationError,
 } from '@/lib/analytics';
@@ -1604,3 +1607,181 @@ describe('dispatch targets and PostHog fallback', () => {
     expect(capture).not.toHaveBeenCalled();
   });
 })
+describe('detectNetwork (§3.1 network)', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('maps the configured Stellar network to testnet | mainnet', () => {
+    expect(detectNetwork('stellar-testnet')).toBe('testnet');
+    expect(detectNetwork('stellar-mainnet')).toBe('mainnet');
+    expect(detectNetwork(' STELLAR-MAINNET ')).toBe('mainnet');
+  });
+
+  it('reads NEXT_PUBLIC_CRYPTO_NETWORK by default', () => {
+    vi.stubEnv('NEXT_PUBLIC_CRYPTO_NETWORK', 'stellar-mainnet');
+    expect(detectNetwork()).toBe('mainnet');
+    vi.stubEnv('NEXT_PUBLIC_CRYPTO_NETWORK', 'stellar-testnet');
+    expect(detectNetwork()).toBe('testnet');
+  });
+
+  it('falls back to testnet when unset or unrecognised so test traffic is never counted as production', () => {
+    vi.stubEnv('NEXT_PUBLIC_CRYPTO_NETWORK', '');
+    expect(detectNetwork()).toBe('testnet');
+    expect(detectNetwork('stellar-futurenet')).toBe('testnet');
+    expect(detectNetwork('mainnet-typo')).toBe('testnet');
+  });
+});
+
+describe('base payload network & user_agent (§3.1)', () => {
+  const UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Mobile/15E148';
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    delete (window as unknown as { plausible?: unknown }).plausible;
+  });
+
+  it('buildBasePayload carries the raw user agent and the configured network', () => {
+    vi.stubGlobal('navigator', { userAgent: UA });
+    vi.stubEnv('NEXT_PUBLIC_CRYPTO_NETWORK', 'stellar-mainnet');
+
+    const payload = buildBasePayload();
+    expect(payload.user_agent).toBe(UA);
+    expect(payload.network).toBe('mainnet');
+  });
+
+  it('attaches user_agent and network to every dispatched event', () => {
+    vi.stubGlobal('navigator', { userAgent: UA });
+    vi.stubEnv('NEXT_PUBLIC_CRYPTO_NETWORK', 'stellar-testnet');
+    const plausible = plausibleMock();
+    (window as unknown as { plausible?: typeof plausible }).plausible = plausible;
+
+    analytics.sendFormViewed();
+    analytics.pageViewed({ page: '/' });
+    analytics.claimPageOpened({ claimId: 'tok_net', entryChannel: 'direct' });
+
+    expect(plausible).toHaveBeenCalledTimes(3);
+    for (const call of plausible.mock.calls) {
+      expect(call[1].props).toEqual(
+        expect.objectContaining({ user_agent: UA, network: 'testnet' }),
+      );
+    }
+  });
+});
+
+describe('normalizeAssetType (§3.2 asset_type)', () => {
+  it('maps backend identifiers and bare codes to a canonical code', () => {
+    expect(normalizeAssetType('native')).toBe('XLM');
+    expect(normalizeAssetType('XLM')).toBe('XLM');
+    expect(normalizeAssetType('xlm')).toBe('XLM');
+    expect(normalizeAssetType('USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5')).toBe(
+      'USDC',
+    );
+    expect(normalizeAssetType(' usdc ')).toBe('USDC');
+  });
+
+  it('returns undefined when there is no asset to report', () => {
+    expect(normalizeAssetType(undefined)).toBeUndefined();
+    expect(normalizeAssetType(null)).toBeUndefined();
+    expect(normalizeAssetType('')).toBeUndefined();
+    expect(normalizeAssetType(':GABC')).toBeUndefined();
+  });
+});
+
+describe('toAmountUsdEquiv (§3.2 amount_usd_equiv)', () => {
+  it('converts USDC 1:1 without needing a rate', () => {
+    expect(toAmountUsdEquiv(25, 'USDC')).toBe(25);
+    expect(toAmountUsdEquiv('10.5', 'USDC:GABC')).toBe(10.5);
+  });
+
+  it('converts XLM at the supplied rate, rounded to cents', () => {
+    expect(toAmountUsdEquiv(100, 'XLM', 0.1234)).toBe(12.34);
+    expect(toAmountUsdEquiv('3', 'native', 0.115)).toBe(0.35);
+    expect(toAmountUsdEquiv(0, 'XLM', 0.1)).toBe(0);
+  });
+
+  it('is unavailable without a usable rate, amount or known asset', () => {
+    expect(toAmountUsdEquiv(100, 'XLM')).toBeUndefined();
+    expect(toAmountUsdEquiv(100, 'XLM', 0)).toBeUndefined();
+    expect(toAmountUsdEquiv(100, 'EURC', 1.1)).toBeUndefined();
+    expect(toAmountUsdEquiv(undefined, 'USDC')).toBeUndefined();
+    expect(toAmountUsdEquiv('', 'USDC')).toBeUndefined();
+    expect(toAmountUsdEquiv('abc', 'USDC')).toBeUndefined();
+    expect(toAmountUsdEquiv(-5, 'USDC')).toBeUndefined();
+    expect(toAmountUsdEquiv(5, undefined, 0.1)).toBeUndefined();
+  });
+});
+
+describe('asset_type & amount_usd_equiv on emitted events (§3.2)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete (window as unknown as { plausible?: unknown }).plausible;
+  });
+
+  function installPlausible() {
+    const plausible = plausibleMock();
+    (window as unknown as { plausible?: typeof plausible }).plausible = plausible;
+    return plausible;
+  }
+
+  it('normalises asset_type and attaches amount_usd_equiv when supplied', () => {
+    const plausible = installPlausible();
+
+    analytics.paymentCreated({
+      claimId: 'acct_usd_1',
+      assetType: 'usdc',
+      amountUsdEquiv: 25,
+      confirmationTimeMs: 10,
+    });
+    analytics.claimVerified({
+      claimId: 'tok_usd',
+      assetType: 'native',
+      amountUsdEquiv: 1.23,
+      verificationTimeMs: 5,
+    });
+
+    expect(plausible.mock.calls[0]![1].props).toEqual(
+      expect.objectContaining({ asset_type: 'USDC', amount_usd_equiv: 25 }),
+    );
+    expect(plausible.mock.calls[1]![1].props).toEqual(
+      expect.objectContaining({ asset_type: 'XLM', amount_usd_equiv: 1.23 }),
+    );
+  });
+
+  it('omits both properties when they are unavailable', () => {
+    const plausible = installPlausible();
+
+    analytics.paymentConfirmed({ walletType: 'Freighter' });
+    analytics.claimSubmitted({ claimId: 'tok_none', assetType: '', amountUsdEquiv: undefined });
+
+    for (const call of plausible.mock.calls) {
+      expect('asset_type' in call[1].props).toBe(false);
+      expect('amount_usd_equiv' in call[1].props).toBe(false);
+    }
+  });
+
+  it('carries asset props on every asset-bearing event helper', () => {
+    const plausible = installPlausible();
+    const asset = { assetType: 'USDC', amountUsdEquiv: 7 };
+
+    analytics.sendFormCompleted({ ...asset, hasRecipientName: false, hasMessage: false });
+    analytics.paymentConfirmationViewed(asset);
+    analytics.paymentConfirmed(asset);
+    analytics.paymentCreated({ ...asset, claimId: 'acct_all', confirmationTimeMs: 1 });
+    analytics.claimVerified({ ...asset, claimId: 'tok_all', verificationTimeMs: 1 });
+    analytics.claimCtaClicked({ ...asset, claimId: 'tok_all' });
+    analytics.claimConfirmationViewed({ ...asset, claimId: 'tok_all' });
+    analytics.claimSubmitted({ ...asset, claimId: 'tok_all' });
+    analytics.claimSucceeded({ ...asset, claimId: 'tok_all_succeeded' });
+    analytics.claimFailed({ ...asset, claimId: 'tok_all', errorType: 'unknown', attemptNumber: 1 });
+    analytics.claimSuccessViewed({ ...asset, claimId: 'tok_all' });
+
+    expect(plausible).toHaveBeenCalledTimes(11);
+    for (const call of plausible.mock.calls) {
+      expect(call[1].props).toEqual(
+        expect.objectContaining({ asset_type: 'USDC', amount_usd_equiv: 7 }),
+      );
+    }
+  });
+});

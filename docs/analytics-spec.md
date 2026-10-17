@@ -142,6 +142,12 @@ These properties are included only where relevant and marked `(if available)` in
 | `error_code` | string | Machine-readable error identifier |
 | `error_type` | string | Category of error (see §6) |
 
+> **Implementation notes (`frontend/lib/analytics.ts`):**
+> - `network` is derived from `NEXT_PUBLIC_CRYPTO_NETWORK` by `detectNetwork()`. Only `stellar-mainnet` reports `mainnet`; an unset or unrecognised value reports `testnet`, so a misconfigured build is excluded from production dashboards rather than polluting them.
+> - `user_agent` is the raw `navigator.userAgent` string (empty during SSR).
+> - `asset_type` is normalised by `normalizeAssetType()` (`native` → `XLM`, `CODE:ISSUER` → `CODE`, uppercased) on every event that carries it.
+> - `amount_usd_equiv` is computed by `toAmountUsdEquiv()`: USDC converts 1:1, XLM uses the cached CoinGecko XLM/USD rate (`lib/xlm-price.ts`), and the value is rounded to cents. It is omitted, never sent as `0`, when the rate is not yet known or the asset has no USD mapping.
+
 ---
 
 ## 4. Sender Journey Events
