@@ -5,7 +5,15 @@ import { RateLimitBanner } from '@/components/rate-limit-banner';
 import { RateLimitError } from '@/lib/api/client';
 import { ChainSelector } from '@/components/chain-selector';
 import { AccountStatus } from '@/lib/api/types';
-import { analytics, type ValidationError } from '@/lib/analytics';
+import { ClaimError } from '@/lib/claim-errors';
+import {
+  analytics,
+  ERROR_TYPES,
+  EXPLORERS,
+  type ErrorType,
+  type ValidationError,
+} from '@/lib/analytics';
+import { currentStellarNetwork, explorerTxUrl } from '@/lib/stellar-explorer';
 
 /**
  * ClaimStatus mirrors the backend's real AccountStatus enum instead of a
@@ -40,6 +48,15 @@ export interface ClaimStatusCardProps {
   sweepDestination?: string;
   /** Amount swept during this session, in stroops. */
   sweepAmountStroops?: string;
+  /**
+   * Hash of the sweep transaction, when the API reported one.
+   *
+   * The explorer link is rendered only when this is present: a claim or
+   * account id in a `/tx/` URL resolves to nothing, and putting the claim
+   * token in a third-party URL is exactly what `docs/security-model.mdx`
+   * (T-16) forbids.
+   */
+  sweepTxHash?: string;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -134,6 +151,42 @@ function deriveValidationError(address: string): ValidationError {
   return 'invalid_checksum';
 }
 
+/**
+ * Maps a failed claim submission onto §6's `error_type` taxonomy.
+ *
+ * `ClaimError` already carries a machine-readable `code` and a `retryable`
+ * flag, but its codes describe *what the sender should be told*, not which
+ * taxonomy bucket the failure belongs to. Mapping here means `Retry Clicked`
+ * can report the reason a retry was offered instead of a blanket `unknown`.
+ */
+function claimSubmissionErrorType(err: unknown): ErrorType {
+  if (!(err instanceof ClaimError)) return ERROR_TYPES.unknown;
+  switch (err.code) {
+    case 'SUBMISSION_FAILED_RETRYABLE':
+    case 'SUBMISSION_TIMEOUT':
+      // The request never reached the server, or its outcome is still unknown.
+      return ERROR_TYPES.network_unavailable;
+    case 'EXPIRED':
+      return ERROR_TYPES.expired_token;
+    case 'ALREADY_CLAIMED':
+      return ERROR_TYPES.already_claimed;
+    case 'INVALID_ADDRESS':
+      return ERROR_TYPES.invalid_wallet_address;
+    case 'SWEEP_FAILED':
+    case 'SWEEP_CONTRACT_FAILED':
+    case 'DESTINATION_NOT_FUNDED':
+    case 'SUBMISSION_FAILED_FINAL':
+      return ERROR_TYPES.transaction_failed;
+    case 'TOKEN_NOT_FOUND':
+      return ERROR_TYPES.invalid_token;
+    case 'RATE_LIMITED':
+    case 'NETWORK_ERROR':
+      return ERROR_TYPES.network_unavailable;
+    default:
+      return ERROR_TYPES.unknown;
+  }
+}
+
 function AvailablePanel({
   claimId,
   amountStroops,
@@ -158,9 +211,23 @@ function AvailablePanel({
   const errorDisplayedRef = useRef(false);
   const [attemptNumber, setAttemptNumber] = useState(0);
   const wasInvalid = useRef(false);
+  // The §6 taxonomy value and code of the error currently on screen, so that
+  // `Retry Clicked` can report what prompted the retry instead of 'unknown'.
+  const retryErrorType = useRef<ErrorType | null>(null);
+  const retryErrorCode = useRef<string | null>(null);
 
   // Matches the backend's Stellar public key validation (StrKey ed25519 public keys).
   const isValidAddress = /^G[A-Z2-7]{55}$/.test(destinationAddress);
+
+  // §5.2 Wallet Address Screen Viewed — fires once when this panel renders.
+  // `has_previous_address` is a constant false today: nothing in the app
+  // persists a recipient address, so there is never a previous address to
+  // suggest. It is reported rather than omitted so that dashboard queries
+  // written against the spec keep working if that feature is added later.
+  useEffect(() => {
+    if (!claimId) return;
+    analytics.walletAddressScreenViewed({ claimId, hasPreviousAddress: false });
+  }, [claimId]);
 
   // §6 Error Displayed — fires once when claimError first appears.
   useEffect(() => {
@@ -190,6 +257,18 @@ function AvailablePanel({
         validationError: deriveValidationError(destinationAddress),
         attemptNumber: next,
       });
+      // §6 invalid_wallet_address — the inline "that is not a Stellar address"
+      // hint is the error surface a recipient actually sees, because the Claim
+      // button is disabled while the address is invalid and the submit path
+      // below is therefore unreachable from the UI. Fired once per editing
+      // episode (on the transition into invalid) rather than per keystroke.
+      analytics.errorDisplayed({
+        journey: 'recipient',
+        claimId,
+        errorType: ERROR_TYPES.invalid_wallet_address,
+        errorCode: `INVALID_ADDRESS_${deriveValidationError(destinationAddress).toUpperCase()}`,
+        sourceScreen: 'claim_landing',
+      });
     }
     wasInvalid.current = invalid;
   }, [destinationAddress, isValidAddress, claimId, attemptNumber]);
@@ -197,23 +276,35 @@ function AvailablePanel({
   async function handleClaim() {
     if (!isValidAddress) {
       // Wallet address fails client-side validation (§6 `invalid_wallet_address`).
+      // Reachable only from a programmatic submit, since the button is
+      // disabled while invalid; the visible hint is instrumented above.
       analytics.errorDisplayed({
         journey: 'recipient',
-        errorType: 'invalid_wallet_address',
+        claimId,
+        errorType: ERROR_TYPES.invalid_wallet_address,
         errorCode: 'INVALID_ADDRESS',
         sourceScreen: 'claim_landing',
       });
       return;
     }
+
+    // §5.2 Wallet Address Entered — the address passed client-side validation
+    // and is now the sweep destination. The address itself is never sent.
+    analytics.walletAddressEntered({ claimId, usedPreviousAddress: false });
+
     setClaiming(true);
     setRateLimit(undefined);
 
     // §6 Retry Clicked — fires when the user re-submits after seeing an error.
+    // `retryErrorType` carries the error that actually prompted the retry
+    // rather than a blanket 'unknown', which previously made every retry
+    // indistinguishable in the data.
     if (claimError) {
       analytics.retryClicked({
         journey: 'recipient',
         claimId,
-        errorType: 'unknown',
+        errorType: retryErrorType.current ?? ERROR_TYPES.unknown,
+        errorCode: retryErrorCode.current ?? 'CLAIM_SUBMISSION_ERROR',
         attemptNumber: attemptNumberRef.current,
       });
     }
@@ -231,6 +322,9 @@ function AvailablePanel({
         // `handleClaim` is wired up as `onClick={handleClaim}` directly, so
         // nothing awaits or catches this async function's own returned
         // promise. Surface the error in state instead.
+        retryErrorType.current = claimSubmissionErrorType(err);
+        retryErrorCode.current =
+          err instanceof ClaimError ? err.code : err instanceof Error ? 'CLAIM_SUBMISSION_ERROR' : 'unknown';
         setClaimError(
           err instanceof Error ? err.message : 'Something went wrong. Please try again.',
         );
@@ -381,7 +475,11 @@ function ClaimedPanel({
   assetCode,
   sweepDestination,
   claimedByMe,
-}: Pick<ClaimStatusCardProps, 'claimId' | 'assetCode' | 'sweepDestination' | 'claimedByMe'>) {
+  sweepTxHash,
+}: Pick<
+  ClaimStatusCardProps,
+  'claimId' | 'assetCode' | 'sweepDestination' | 'claimedByMe' | 'sweepTxHash'
+>) {
   // §5.4 Claim Success Viewed — fires once when this session's successful
   // claim result is displayed. Guarded by claimedByMe to avoid firing when
   // the panel shows because someone else already claimed.
@@ -391,6 +489,11 @@ function ClaimedPanel({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // `null` when the backend did not report a sweep transaction hash, in which
+  // case no explorer link is rendered rather than linking to something that
+  // cannot resolve.
+  const explorerUrl = explorerTxUrl(currentStellarNetwork(), sweepTxHash);
 
   return (
     <div className="space-y-3">
@@ -426,22 +529,27 @@ function ClaimedPanel({
 
       {claimedByMe && claimId && (
         <div className="space-y-2">
-          {/* §5.4 Explorer Link Clicked — Stellar block explorer link */}
-          <a
-            href={`https://stellar.expert/explorer/testnet/tx/${claimId}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={() =>
-              analytics.explorerLinkClicked({
-                journey: 'recipient',
-                claimId,
-                sourceScreen: 'claim_success',
-              })
-            }
-            className="block text-center text-xs text-blue-600 underline underline-offset-2 hover:text-blue-800 dark:text-blue-300 dark:hover:text-blue-100"
-          >
-            View transaction on Stellar Explorer ↗
-          </a>
+          {/* §5.4 Explorer Link Clicked — Stellar block explorer link.
+              Rendered only when a real sweep transaction hash is known. */}
+          {explorerUrl && (
+            <a
+              href={explorerUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={() =>
+                analytics.explorerLinkClicked({
+                  journey: 'recipient',
+                  claimId,
+                  sourceScreen: 'claim_success',
+                  explorer: EXPLORERS.stellar_expert,
+                  txHash: sweepTxHash,
+                })
+              }
+              className="block text-center text-xs text-blue-600 underline underline-offset-2 hover:text-blue-800 dark:text-blue-300 dark:hover:text-blue-100"
+            >
+              View transaction on Stellar Explorer ↗
+            </a>
+          )}
 
           {/* §5.4 Sender Signup CTA Clicked — viral growth loop */}
           <a
@@ -577,6 +685,7 @@ export function ClaimStatusCard({
   supportEmail,
   claimedByMe,
   sweepDestination,
+  sweepTxHash,
 }: ClaimStatusCardProps) {
   return (
     <article
@@ -616,6 +725,7 @@ export function ClaimStatusCard({
           assetCode={assetCode}
           claimedByMe={claimedByMe}
           sweepDestination={sweepDestination}
+          sweepTxHash={sweepTxHash}
         />
       )}
       {status === AccountStatus.EXPIRED && (

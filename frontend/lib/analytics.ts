@@ -351,6 +351,42 @@ function isDuplicateClaimEvent(event: ClaimEvent, claimId: unknown): boolean {
   return claimEventDedupStore.isDuplicate(`${event}::${claimId}`);
 }
 
+/**
+ * Whether this browser has opened a claim link before (§5.1
+ * `is_returning_visit`).
+ *
+ * This is deliberately a counter of claim opens, not a set of claim ids. The
+ * question Claim Conversion Rate needs answered is "is this recipient new to
+ * Bridgelet, or someone who has been thinking about it for a week?", and that
+ * is answerable without ever writing a claim token to storage. Storing the
+ * tokens would put bearer credentials for real money in `localStorage`, which
+ * `bridgelet-product-audit/checklists/localstorage-data-exposure-checklist.md`
+ * exists to prevent.
+ *
+ * The value is therefore browser-scoped rather than per-claim: opening two
+ * different claim links from one browser reports `true` on the second. That is
+ * the intended trade-off and is documented in the spec.
+ *
+ * Bounded on purpose — a visitor who opens thousands of links would otherwise
+ * grow an ever-larger integer for no extra signal.
+ */
+const CLAIM_OPENS_KEY = 'bridgelet_claim_opens';
+const CLAIM_OPENS_CAP = 1000;
+
+export function isReturningClaimVisitor(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const raw = localStorage.getItem(CLAIM_OPENS_KEY);
+    const previous = raw == null ? 0 : Number.parseInt(raw, 10);
+    const count = Number.isFinite(previous) ? Math.min(previous, CLAIM_OPENS_CAP) : 0;
+    localStorage.setItem(CLAIM_OPENS_KEY, String(Math.min(count + 1, CLAIM_OPENS_CAP)));
+    return count > 0;
+  } catch {
+    // Storage unavailable: report a first visit rather than inventing history.
+    return false;
+  }
+}
+
 // ─── track() ──────────────────────────────────────────────────────────────────
 
 /**
@@ -431,7 +467,32 @@ export type ShareMethod = 'sms' | 'email' | 'whatsapp' | 'qr_code';
 
 export type EntrySource = 'direct' | 'referral' | 'shared_link' | 'unknown';
 
-export type ClaimEntryChannel = 'sms' | 'email' | 'whatsapp' | 'direct' | 'unknown';
+/**
+ * How a recipient arrived at the claim link (§5.1 `entry_channel`).
+ *
+ * `qr_scan` is a mobile-only entry path and `deep_link` distinguishes an
+ * opened app-link from a pasted URL; both are separate acquisition channels
+ * for §8.2's Recipient Entry Channel Distribution, so neither can be folded
+ * into `direct`.
+ */
+export type ClaimEntryChannel =
+  | 'sms'
+  | 'email'
+  | 'whatsapp'
+  | 'qr_scan'
+  | 'deep_link'
+  | 'direct'
+  | 'unknown';
+
+export const CLAIM_ENTRY_CHANNELS: readonly ClaimEntryChannel[] = [
+  'sms',
+  'email',
+  'whatsapp',
+  'qr_scan',
+  'deep_link',
+  'direct',
+  'unknown',
+];
 
 export type PaymentClaimStatus = 'unclaimed' | 'claimed' | 'expired';
 
@@ -487,6 +548,8 @@ interface RetryClickedProps {
   claimId?: string | null;
   /** Error type that triggered the retry prompt. */
   errorType: ErrorType;
+  /** §3.2 `error_code` for the error being retried; defaults to `unknown`. */
+  errorCode?: string;
   /** Which retry attempt this is (1-based). */
   attemptNumber: number;
 }
@@ -534,6 +597,18 @@ interface SenderSignupCtaClickedProps {
 /** §5.4/§6 source_screen values for Explorer Link Clicked. */
 export type ExplorerSourceScreen = 'claim_success' | 'payment_details';
 
+/**
+ * Which block explorer the link pointed at (§5.4 `explorer`).
+ *
+ * The explorer differs by network, so the value is recorded rather than
+ * inferred by whoever reads the report later.
+ */
+export const EXPLORERS = {
+  stellar_expert: 'stellar_expert',
+} as const;
+
+export type Explorer = (typeof EXPLORERS)[keyof typeof EXPLORERS];
+
 /** §2.3 journey values for Explorer Link Clicked. */
 export type ExplorerJourney = 'sender' | 'recipient';
 
@@ -541,6 +616,26 @@ interface ExplorerLinkClickedProps {
   journey: ExplorerJourney;
   claimId: string;
   sourceScreen: ExplorerSourceScreen;
+  /** Which explorer the link opened. Defaults to `stellar_expert`. */
+  explorer?: Explorer;
+  /**
+   * Transaction the link pointed at. Omitted when the frontend has no
+   * transaction hash for the sweep — see §5.4 for why an absent hash is not
+   * the same as a zero one.
+   */
+  txHash?: string;
+}
+
+interface WalletAddressScreenViewedProps {
+  claimId: string;
+  /** Whether a previously-used address was offered as a suggestion. */
+  hasPreviousAddress: boolean;
+}
+
+interface WalletAddressEnteredProps {
+  claimId: string;
+  /** Whether the recipient reused a previously suggested address. */
+  usedPreviousAddress: boolean;
 }
 
 /** Client-side address-validation failure reasons (`docs/analytics-spec.md` §5.2). */
@@ -574,25 +669,25 @@ export const analytics = {
   claimPageViewed: ({ claimId, entryChannel }: { claimId: string; entryChannel: ClaimEntryChannel }) =>
     track('Claim Page Opened', {
       journey: 'recipient',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       entry_channel: entryChannel,
     }),
   claimInitiated: ({ claimId, assetType }: { claimId: string; assetType?: string }) =>
     track('Claim CTA Clicked', {
       journey: 'recipient',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       ...(assetType ? { asset_type: assetType } : {}),
     }),
   claimSuccess: ({ claimId, assetType }: { claimId: string; assetType?: string }) =>
     track('Claim Succeeded', {
       journey: 'recipient',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       ...(assetType ? { asset_type: assetType } : {}),
     }),
   claimError: ({ claimId, assetType, errorCode = 'unknown', errorType, attemptNumber }: ClaimFailedProps) =>
     track('Claim Failed', {
       journey: 'recipient',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       ...(assetType ? { asset_type: assetType } : {}),
       error_code: errorCode,
       error_type: errorType,
@@ -656,7 +751,7 @@ export const analytics = {
   }) =>
     track('Payment Created', {
       journey: 'sender',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       ...(assetType ? { asset_type: assetType } : {}),
       ...(expiryDays != null ? { expiry_days: expiryDays } : {}),
       confirmation_time_ms: confirmationTimeMs,
@@ -670,26 +765,67 @@ export const analytics = {
   }) =>
     track('Claim Link Copied', {
       journey: 'sender',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       copy_location: copyLocation,
     }),
   claimLinkShared: ({ claimId, shareMethod }: { claimId: string; shareMethod: ShareMethod }) =>
     track('Claim Link Shared', {
       journey: 'sender',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       share_method: shareMethod,
     }),
   claimPageOpened: ({
     claimId,
     entryChannel,
+    isReturningVisit,
   }: {
     claimId: string;
     entryChannel: ClaimEntryChannel;
+    /**
+     * Whether this browser had already opened a claim link before. Defaults to
+     * the locally-observed value — see `isReturningClaimVisitor`.
+     */
+    isReturningVisit?: boolean;
   }) =>
     track('Claim Page Opened', {
       journey: 'recipient',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       entry_channel: entryChannel,
+      is_returning_visit: isReturningVisit ?? isReturningClaimVisitor(),
+    }),
+
+  /**
+   * §5.2 `Wallet Address Screen Viewed` — fires when the address-entry panel
+   * is rendered, i.e. when the recipient has a claim to enter an address for.
+   * The panel is the only place in the app that asks for a wallet address.
+   */
+  walletAddressScreenViewed: ({
+    claimId,
+    hasPreviousAddress = false,
+  }: WalletAddressScreenViewedProps) =>
+    track('Wallet Address Screen Viewed', {
+      journey: 'recipient',
+      ...conditional.claimId(claimId),
+      has_previous_address: hasPreviousAddress,
+    }),
+
+  /**
+   * §5.2 `Wallet Address Entered` — fires when the recipient submits an
+   * address that passes client-side validation, i.e. at the moment the address
+   * becomes the destination for the sweep.
+   *
+   * The address itself is never included: it is a third party's public key and
+   * has no place in an analytics payload. `usedPreviousAddress` is therefore
+   * always derivable from the event without carrying the value.
+   */
+  walletAddressEntered: ({
+    claimId,
+    usedPreviousAddress = false,
+  }: WalletAddressEnteredProps) =>
+    track('Wallet Address Entered', {
+      journey: 'recipient',
+      ...conditional.claimId(claimId),
+      used_previous_address: usedPreviousAddress,
     }),
   paymentDetailsViewed: ({
     claimId,
@@ -700,7 +836,7 @@ export const analytics = {
   }) =>
     track('Payment Details Viewed', {
       journey: 'sender',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       claim_status: claimStatus,
     }),
   pageViewed: ({ page, entrySource }: { page: string; entrySource?: EntrySource }) =>
@@ -738,7 +874,7 @@ export const analytics = {
   }: ErrorDisplayedProps) =>
     track('Error Displayed', {
       journey,
-      ...(claimId ? { claim_id: claimId } : {}),
+      ...(claimId ? conditional.claimId(claimId) : {}),
       ...conditional.errorType(errorType),
       ...conditional.errorCode(errorCode ?? 'unknown'),
       source_screen: sourceScreen,
@@ -750,14 +886,14 @@ export const analytics = {
   }: WalletAddressValidationFailedProps) =>
     track('Wallet Address Validation Failed', {
       journey: 'recipient',
-      ...(claimId ? { claim_id: claimId } : {}),
+      ...(claimId ? conditional.claimId(claimId) : {}),
       validation_error: validationError,
       attempt_number: attemptNumber,
     }),
   claimConfirmationViewed: ({ claimId, assetType }: ClaimCtaClickedProps) =>
     track('Claim Confirmation Viewed', {
       journey: 'recipient',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       ...(assetType ? { asset_type: assetType } : {}),
     }),
 
@@ -770,12 +906,14 @@ export const analytics = {
     journey,
     claimId,
     errorType,
+    errorCode,
     attemptNumber,
   }: RetryClickedProps) =>
     track('Retry Clicked', {
       journey,
-      ...(claimId != null ? { claim_id: claimId } : {}),
-      error_type: errorType,
+      ...(claimId != null ? conditional.claimId(claimId) : {}),
+      ...conditional.errorType(errorType),
+      ...conditional.errorCode(errorCode ?? 'unknown'),
       attempt_number: attemptNumber,
     }),
 
@@ -792,7 +930,7 @@ export const analytics = {
   }: ClaimFailedProps) =>
     track('Claim Failed', {
       journey: 'recipient',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       ...(assetType ? { asset_type: assetType } : {}),
       error_code: errorCode,
       error_type: errorType,
@@ -805,7 +943,7 @@ export const analytics = {
   claimSuccessViewed: ({ claimId, assetType }: ClaimSuccessViewedProps) =>
     track('Claim Success Viewed', {
       journey: 'recipient',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       ...(assetType ? { asset_type: assetType } : {}),
     }),
 
@@ -816,7 +954,7 @@ export const analytics = {
   senderSignupCtaClicked: ({ claimId }: SenderSignupCtaClickedProps) =>
     track('Sender Signup CTA Clicked', {
       journey: 'recipient',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       source: 'claim_success_screen',
     }),
 
@@ -824,16 +962,27 @@ export const analytics = {
    * §5.4/§6 Explorer Link Clicked — fires when a user (sender or recipient) clicks a
    * Stellar Explorer transaction link.
    */
-  explorerLinkClicked: ({ journey, claimId, sourceScreen }: ExplorerLinkClickedProps) =>
+  explorerLinkClicked: ({
+    journey,
+    claimId,
+    sourceScreen,
+    explorer = EXPLORERS.stellar_expert,
+    txHash,
+  }: ExplorerLinkClickedProps) =>
     track('Explorer Link Clicked', {
       journey,
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       source_screen: sourceScreen,
+      explorer,
+      // Omitted rather than null: no hash means the frontend could not
+      // attribute the click to a transaction, which is different from an
+      // empty hash on a real one.
+      ...(txHash ? { tx_hash: txHash } : {}),
     }),
   claimSubmitted: ({ claimId, assetType }: ClaimCtaClickedProps) =>
     track('Claim Submitted', {
       journey: 'recipient',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       ...(assetType ? { asset_type: assetType } : {}),
     }),
   claimSucceeded: ({
@@ -845,7 +994,7 @@ export const analytics = {
   }: ClaimSucceededProps) =>
     track('Claim Succeeded', {
       journey: 'recipient',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       ...(assetType ? { asset_type: assetType } : {}),
       ...(timeToClaimHours !== undefined ? { time_to_claim_hours: timeToClaimHours } : {}),
       ...(sweepDurationMs !== undefined ? { sweep_duration_ms: sweepDurationMs } : {}),
