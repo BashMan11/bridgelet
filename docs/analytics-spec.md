@@ -1102,6 +1102,16 @@ This spec is platform-agnostic and compatible with:
 - **[Mixpanel](https://mixpanel.com)** — strong funnel analysis
 - **[Amplitude](https://amplitude.com)** — strong for product metrics
 
+**Current Bridgelet wiring (web):** Plausible is the primary collector
+(`frontend/components/plausible-script.tsx`, configured by
+`NEXT_PUBLIC_PLAUSIBLE_DOMAIN`), with PostHog (`window.posthog.capture`) as an
+automatic fallback (`track()` in `frontend/lib/analytics.ts`). Plausible is a
+collector, not one of the routing/analysis platforms above, so it does not
+contradict this list: event names and payloads are unchanged whichever
+provider receives them, and swapping collectors is a dispatch change only.
+The mobile app (`mobile/app/src/analytics/analytics.ts`) is a console-only
+stub and must target this same primary/fallback pair when a provider is wired.
+
 ### 9.2 Client-Side vs. Server-Side
 
 | Event | Recommended Source | Reason |

@@ -25,5 +25,7 @@ export function track(event: AnalyticsEvent): void {
     console.log("[Analytics]", event.name, "params" in event ? event.params : "");
     return;
   }
-  // Plug in your analytics provider here (e.g. Segment, Amplitude, PostHog)
+  // Provider not wired yet. When it is, target the same primary/fallback pair
+  // as the web app — Plausible first, PostHog capture as fallback
+  // (`docs/analytics-spec.md` §9.1, `frontend/lib/analytics.ts` `track()`).
 }
