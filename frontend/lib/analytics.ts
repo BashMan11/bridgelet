@@ -695,7 +695,7 @@ let warnedNoProvider = false;
  * 4. Console output in development, with payload-shape verification when
  *    NEXT_PUBLIC_ANALYTICS_VERIFY is enabled.
  */
-function track(event: ClaimEvent, props?: EventProps): void {
+function track<E extends ClaimEvent>(event: E, props: EventPayloadMap[E]): void {
   if (typeof window === 'undefined') return;
 
   // Consent gate — before anything else, and before the §9.5 DNT check,
@@ -710,22 +710,26 @@ function track(event: ClaimEvent, props?: EventProps): void {
   // happen before identifier generation, not just before the provider call.
   if (isDoNotTrackEnabled()) return;
 
+  // Narrow at the call boundary only; inside, the payload is the open §3.1
+  // record that gets merged with the base payload (#854).
+  const eventProps = props as EventProps;
+
   // #634 (§9.4) — third, so a suppressed duplicate also avoids burning a
   // `message_id`.
-  if (isDuplicateClaimEvent(event, props?.claim_id)) return;
+  if (isDuplicateClaimEvent(event, eventProps.claim_id)) return;
 
   // §3.1 `journey` is resolved from the emitter's props so it is populated
   // centrally rather than trusted as a free-form string, then the emitter's
   // own value is applied on top — same value, but the base payload is never
   // missing the field.
-  const journey = normalizeJourney(props?.journey);
+  const journey = normalizeJourney(eventProps.journey);
 
   // Base payload is merged in first so event-specific props can override.
   const payload: EventProps = {
     ...buildBasePayload(journey),
     anonymous_id: getAnonymousId(),
     session_id: getSessionId(),
-    ...props,
+    ...eventProps,
     journey,
     // §9.4: a per-event UUID for the analytics pipeline to deduplicate on.
     // Applied after `...props` so no call site can override or blank it.
@@ -962,9 +966,85 @@ export function daysRemainingUntil(iso: string): number | undefined {
   return Math.max(0, Math.ceil((expiresAt - Date.now()) / 86_400_000));
 }
 
+// ─── §3.2 Per-event payload map (#854) ────────────────────────────────────────
+
+/**
+ * Exact wire payload (snake_case keys, i.e. what `track()` receives after the
+ * camelCase emitter params are converted) for each `ClaimEvent`. Mirrors
+ * `mobile/app/src/analytics/analytics.ts`'s `AnalyticsEvent` union.
+ *
+ * `journey` is optional everywhere: `track()` normalizes it centrally via
+ * `normalizeJourney()`, so no emitter is required to repeat it.
+ * Shapes for events with no emitter yet are taken from their §4–§6 tables;
+ * the first real emitter may tighten them.
+ */
+type SendFormField = 'amount' | 'asset' | 'recipient_name' | 'message' | 'expiration';
+type WalletProviderPath = 'freighter' | 'lobstr' | 'generated';
+type DashboardFilter = 'all' | 'unclaimed' | 'claimed' | 'expired';
+
+type EventPayloadShapes = {
+  'Page Viewed': { page: string; entry_source?: EntrySource; journey?: Journey };
+  'Send Form Viewed': { journey?: Journey };
+  'Send Form Started': { journey?: Journey; first_field: SendFormField };
+  'Send Form Field Changed': { journey?: Journey; field_name: SendFormField; asset_type?: string; expiry_days?: number | null };
+  'Send Form Completed': { journey?: Journey; asset_type?: string; expiry_days?: number; has_recipient_name: boolean; has_message: boolean };
+  'Payment Confirmation Viewed': { journey?: Journey; asset_type?: string; expiry_days?: number };
+  'Wallet Connected': { journey?: Journey; wallet_type?: string; wallet_provider: WalletProviderPath };
+  'Wallet Connection Failed': { journey?: Journey; wallet_type?: string; wallet_provider: WalletProviderPath; error_code?: string };
+  'Payment Confirmed': { journey?: Journey; asset_type?: string; expiry_days?: number; wallet_type?: string };
+  'Payment Created': { journey?: Journey; claim_id: string; asset_type?: string; expiry_days?: number; confirmation_time_ms: number };
+  'Payment Creation Failed': { journey?: Journey; asset_type?: string; error_code?: string };
+  'Payment Success Viewed': { journey?: Journey; claim_id: string; asset_type?: string };
+  'Claim Link Copied': { journey?: Journey; claim_id: string; copy_location: 'success_screen' | 'dashboard_detail' };
+  'Claim Link Shared': { journey?: Journey; claim_id: string; share_method: ShareMethod };
+  'Dashboard Viewed': { journey?: Journey; total_payments: number; active_filter: DashboardFilter };
+  'Dashboard Filter Applied': { journey?: Journey; filter: DashboardFilter };
+  'Payment Details Viewed': { journey?: Journey; claim_id: string; claim_status: PaymentClaimStatus };
+  'Payment Cancelled': { journey?: Journey; claim_id: string; asset_type?: string; time_since_creation_hours: number };
+  'Funds Reclaimed': { journey?: Journey; claim_id: string; asset_type?: string; reclaim_reason: 'expired' | 'cancelled'; days_expired?: number };
+  'Recovery Information Viewed': { journey?: Journey; claim_id: string; recovery_method: RecoveryMethod };
+  'Recovery Information Copied': { journey?: Journey; claim_id: string; recovery_method: RecoveryMethod; copy_target: RecoveryCopyTarget };
+  'Claim Page Opened': { journey?: Journey; claim_id: string; entry_channel: ClaimEntryChannel; is_returning_visit?: boolean };
+  'Claim Verified': { journey?: Journey; claim_id: string; asset_type?: string; expiry_days_remaining?: number; verification_time_ms: number };
+  'Claim CTA Clicked': { journey?: Journey; claim_id: string; asset_type?: string };
+  'Wallet Address Screen Viewed': { journey?: Journey; claim_id: string; has_previous_address: boolean };
+  'Wallet Address Entered': { journey?: Journey; claim_id: string; used_previous_address: boolean };
+  'Wallet Address Validation Failed': { journey?: Journey; claim_id?: string; validation_error: ValidationError; attempt_number: number };
+  'Claim Confirmation Viewed': { journey?: Journey; claim_id: string; asset_type?: string };
+  'Claim Submitted': { journey?: Journey; claim_id: string; asset_type?: string };
+  'Claim Succeeded': { journey?: Journey; claim_id: string; asset_type?: string; time_to_claim_hours?: number; sweep_duration_ms?: number; entry_channel?: string };
+  'Claim Failed': { journey?: Journey; claim_id: string; asset_type?: string; error_code?: string; error_type: ClaimFailedErrorType; attempt_number: number };
+  'Claim Success Viewed': { journey?: Journey; claim_id: string; asset_type?: string };
+  'Sender Signup CTA Clicked': { journey?: Journey; claim_id: string; source: 'claim_success_screen' };
+  'Explorer Link Clicked': { journey?: ExplorerJourney; claim_id: string; source_screen: ExplorerSourceScreen; tx_hash?: string; explorer?: ExplorerName; network?: ExplorerNetwork };
+  'Error Displayed': { journey?: Journey; claim_id?: string | null; error_type: ErrorType; error_code?: string; source_screen: string };
+  'Retry Clicked': { journey?: Journey; claim_id?: string | null; error_type: ErrorType; attempt_number: number };
+};
+
+/**
+ * `ClaimEvent` → payload, enforced in both directions by construction:
+ *  - a `ClaimEvent` with no shape above maps to `never` (every payload for it
+ *    is a compile error until the shape is written);
+ *  - a shape key that is not a `ClaimEvent` (typo) collapses the whole map to
+ *    `{ [E in ClaimEvent]: never }`, so *every* `track()` call fails.
+ * The `type ClaimEvent` union above stays the single source of truth (CI's
+ * analytics-spec-diff.yml parses it textually).
+ */
+type EventPayloadMap = [Exclude<keyof EventPayloadShapes, ClaimEvent>] extends [never]
+  ? { [E in ClaimEvent]: E extends keyof EventPayloadShapes ? EventPayloadShapes[E] : never }
+  : { [E in ClaimEvent]: never };
+
 // ─── Public analytics surface ─────────────────────────────────────────────────
 
 export const analytics = {
+  /**
+   * Legacy aliases (#849) predating the spec-aligned methods further down
+   * (`claimPageOpened`, `claimCtaClicked`, `claimSucceeded`, `claimFailed`),
+   * which are what the claim page, claim status card, send flow and error
+   * boundaries actually call. These emit the same Title Case §5 events, so
+   * nothing is instrumented differently; they are retained because tests
+   * assert against them. New call sites should use the spec-aligned method.
+   */
   claimPageViewed: ({ claimId, entryChannel }: { claimId: string; entryChannel: ClaimEntryChannel }) =>
     track('Claim Page Opened', {
       journey: 'recipient',
@@ -1112,7 +1192,7 @@ export const analytics = {
   }: ClaimVerifiedProps) =>
     track('Claim Verified', {
       journey: 'recipient',
-      ...conditional.claimId(claimId),
+      claim_id: claimId,
       ...(assetType ? conditional.assetType(assetType) : {}),
       ...(expiryDaysRemaining != null ? { expiry_days_remaining: expiryDaysRemaining } : {}),
       verification_time_ms: verificationTimeMs,
@@ -1120,7 +1200,7 @@ export const analytics = {
   claimCtaClicked: ({ claimId, assetType }: ClaimCtaClickedProps) =>
     track('Claim CTA Clicked', {
       journey: 'recipient',
-      ...conditional.claimId(claimId),
+      claim_id: claimId,
       ...(assetType ? conditional.assetType(assetType) : {}),
     }),
   errorDisplayed: ({
@@ -1133,7 +1213,7 @@ export const analytics = {
     track('Error Displayed', {
       journey,
       ...(claimId ? { claim_id: claimId } : {}),
-      ...conditional.errorType(errorType),
+      error_type: errorType,
       ...conditional.errorCode(errorCode ?? 'unknown'),
       source_screen: sourceScreen,
     }),
