@@ -944,6 +944,9 @@ export const analytics = {
     track('Dashboard Filter Applied', {
       journey: 'sender',
       filter,
+    }),
+
+  /**
    * §4.5 Recovery Information Viewed — fires when a sender opens the surface
    * that shows their recovery information (reclaim instructions or a
    * self-custody backup). The recovery material itself is never in the payload.
