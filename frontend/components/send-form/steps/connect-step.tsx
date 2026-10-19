@@ -1,14 +1,23 @@
 'use client';
 
 import { useState } from 'react';
-import { connectFreighter } from '@/lib/wallet';
+import { connectFreighter, WalletConnectError } from '@/lib/wallet';
 import { ChainSelector } from '@/components/chain-selector';
-import { analytics } from '@/lib/analytics';
+import { analytics, ERROR_TYPES, WALLET_PROVIDERS } from '@/lib/analytics';
 
 type ConnectStepProps = {
   publicKey: string;
   onConnected: (publicKey: string) => void;
 };
+
+/**
+ * Machine-readable connect failure code, falling back to `'UNKNOWN'` for a
+ * non-`WalletConnectError` throw so the event still reports something rather
+ * than being dropped.
+ */
+function classifyConnectError(err: unknown): string {
+  return err instanceof WalletConnectError ? err.code : 'UNKNOWN';
+}
 
 export function ConnectStep({ publicKey, onConnected }: ConnectStepProps) {
   const [status, setStatus] = useState<'idle' | 'connecting' | 'error'>('idle');
@@ -24,11 +33,18 @@ export function ConnectStep({ publicKey, onConnected }: ConnectStepProps) {
     } catch (err) {
       setStatus('error');
       setError(err instanceof Error ? err.message : 'Failed to connect wallet.');
+      // Freighter is the only provider this step can attempt, so the attempt
+      // itself identifies the provider even when the failure happened before
+      // Freighter responded (extension missing, user rejected).
+      analytics.walletConnectionFailed({
+        walletProvider: WALLET_PROVIDERS.freighter,
+        errorCode: classifyConnectError(err),
+      });
       // Sender's wallet refused connection (§6 `wallet_connection_failed`).
       analytics.errorDisplayed({
         journey: 'sender',
-        errorType: 'wallet_connection_failed',
-        errorCode: err instanceof Error ? 'CONNECTION_DENIED' : 'unknown',
+        errorType: ERROR_TYPES.wallet_connection_failed,
+        errorCode: classifyConnectError(err),
         sourceScreen: 'send_form_connect',
       });
     }

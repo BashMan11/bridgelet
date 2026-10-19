@@ -84,7 +84,7 @@ describe('ConfirmStep - Payment Creation Failed analytics', () => {
       new FundingError('SUBMIT_FAILED', 'Network error on submit'),
     );
 
-    render(<ConfirmStep state={defaultState} onBack={vi.fn()} />);
+    render(<ConfirmStep state={defaultState} usdRate={null} onBack={vi.fn()} />);
 
     const confirmBtn = screen.getByRole('button', { name: /confirm & send/i });
     await user.click(confirmBtn);
@@ -118,7 +118,7 @@ describe('ConfirmStep - Payment Creation Failed analytics', () => {
       new Error('API server timeout'),
     );
 
-    render(<ConfirmStep state={defaultState} onBack={vi.fn()} />);
+    render(<ConfirmStep state={defaultState} usdRate={null} onBack={vi.fn()} />);
 
     const confirmBtn = screen.getByRole('button', { name: /confirm & send/i });
     await user.click(confirmBtn);
@@ -155,7 +155,7 @@ describe('ConfirmStep - Payment Creation Failed analytics', () => {
       txHash: 'tx_hash_123',
     });
 
-    render(<ConfirmStep state={defaultState} onBack={vi.fn()} />);
+    render(<ConfirmStep state={defaultState} usdRate={null} onBack={vi.fn()} />);
 
     const confirmBtn = screen.getByRole('button', { name: /confirm & send/i });
     await user.click(confirmBtn);

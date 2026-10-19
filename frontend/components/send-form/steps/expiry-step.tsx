@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
+import { analytics } from '@/lib/analytics';
 
 const EXPIRY_OPTIONS = [
   { value: 24, label: '24 hours' },
@@ -18,6 +19,7 @@ type ExpiryStepProps = {
 export function ExpiryStep({ expiresInHours, onChange, onBack, onNext }: ExpiryStepProps) {
   const [selected, setSelected] = useState<number>(expiresInHours);
   const [error, setError] = useState<string | null>(null);
+  const lastTrackedExpiry = useRef<number>(expiresInHours);
 
   function handleContinue() {
     if (!EXPIRY_OPTIONS.some((o) => o.value === selected)) {
@@ -54,7 +56,16 @@ export function ExpiryStep({ expiresInHours, onChange, onBack, onNext }: ExpiryS
                   name="expiry"
                   value={option.value}
                   checked={isSelected}
-                  onChange={() => setSelected(option.value)}
+                  onChange={() => {
+                    setSelected(option.value);
+                    if (option.value !== lastTrackedExpiry.current) {
+                      lastTrackedExpiry.current = option.value;
+                      analytics.sendFormFieldChanged({
+                        fieldName: 'expiration',
+                        expiryDays: option.value / 24,
+                      });
+                    }
+                  }}
                   className="accent-slate-900"
                 />
                 {option.label}

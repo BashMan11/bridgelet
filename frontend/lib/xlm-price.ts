@@ -28,3 +28,35 @@ export function stroopsToXlm(stroops: string): number {
 export function formatFiat(xlm: number, rate: number): string {
   return (xlm * rate).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
 }
+
+/**
+ * USD equivalent of a payment amount, for the §3.2 `amount_usd_equiv`
+ * conditional property.
+ *
+ * Returns `undefined` — so the caller omits the property entirely — whenever
+ * the answer is not known: a missing rate, an unparseable amount, or a
+ * non-positive amount. Sending `0` instead would be actively wrong, because
+ * volume and revenue KPIs sum this field, and one unpriced payment would
+ * silently pull a reported figure down rather than showing up as a gap.
+ *
+ * A USD-pegged asset is its own USD equivalent and needs no XLM rate, which
+ * is why this works for USDC while the app is still rate-dependent for XLM.
+ */
+export function amountUsdEquiv(
+  amount: string | number | null | undefined,
+  assetCode: string | null | undefined,
+  xlmUsdRate: number | null | undefined,
+): number | undefined {
+  const value = typeof amount === 'number' ? amount : Number(amount);
+  if (!Number.isFinite(value) || value <= 0) return undefined;
+
+  const code = (assetCode ?? '').toUpperCase();
+  if (code !== '' && code !== 'XLM' && code !== 'NATIVE') {
+    // Issued assets are assumed to be USD-denominated, which is the only
+    // denomination the send form currently offers alongside XLM.
+    return Math.round(value * 100) / 100;
+  }
+
+  if (xlmUsdRate == null || !Number.isFinite(xlmUsdRate) || xlmUsdRate <= 0) return undefined;
+  return Math.round(value * xlmUsdRate * 100) / 100;
+}

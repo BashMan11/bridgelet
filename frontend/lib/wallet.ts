@@ -45,21 +45,67 @@ export function clearPersistedWallet(): void {
   localStorage.removeItem(STORAGE_KEY);
 }
 
+/**
+ * Machine-readable reasons a wallet connection attempt can fail.
+ *
+ * Previously every failure surfaced as a bare `Error` whose only machine-
+ * readable content was the message text, so the analytics layer had to guess
+ * (`'CONNECTION_DENIED'` for everything). That matters operationally: a
+ * missing extension and a user who declined the prompt need completely
+ * different fixes, and §4.3's `Wallet Connection Failed` / `error_code` is
+ * the only place those two can be told apart after the fact.
+ */
+export type WalletConnectErrorCode =
+  | 'FREIGHTER_NOT_INSTALLED'
+  | 'CONNECTION_DENIED'
+  | 'NO_ADDRESS_RETURNED'
+  | 'UNKNOWN';
+
+export class WalletConnectError extends Error {
+  readonly code: WalletConnectErrorCode;
+  readonly walletType: WalletType;
+
+  constructor(code: WalletConnectErrorCode, walletType: WalletType, message: string) {
+    super(message);
+    this.name = 'WalletConnectError';
+    this.code = code;
+    this.walletType = walletType;
+  }
+}
+
 // Connect via Freighter browser extension
 export async function connectFreighter(): Promise<ConnectedWallet> {
   const isAvailable = await freighter.isConnected();
   if (!isAvailable) {
-    throw new Error(
+    throw new WalletConnectError(
+      'FREIGHTER_NOT_INSTALLED',
+      'freighter',
       'Freighter extension not found. Please install it from freighter.app and refresh.',
     );
   }
 
   // Request access — this opens the Freighter popup
-  await freighter.requestAccess();
+  try {
+    await freighter.requestAccess();
+  } catch (err) {
+    // Freighter rejects the promise when the user dismisses the popup, so this
+    // is the "declined" path rather than a genuine malfunction.
+    throw new WalletConnectError(
+      'CONNECTION_DENIED',
+      'freighter',
+      err instanceof Error && err.message
+        ? err.message
+        : 'You declined the Freighter connection request.',
+    );
+  }
 
   const { address } = await freighter.getAddress();
   if (!address) {
-    throw new Error('Freighter did not return a public key. Did you approve the request?');
+    throw new WalletConnectError(
+      'NO_ADDRESS_RETURNED',
+      'freighter',
+      'Freighter did not return a public key. Did you approve the request?',
+    );
   }
 
   return { publicKey: address, type: 'freighter' };
