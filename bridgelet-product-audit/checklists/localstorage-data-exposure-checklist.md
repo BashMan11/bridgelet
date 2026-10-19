@@ -9,6 +9,27 @@ This checklist covers all frontend localStorage usage to ensure no sensitive dat
 - [ ] Confirm no other code in the codebase writes additional properties to the `bridgelet_wallet` localStorage entry
 - [ ] Verify `clearPersistedWallet()` properly removes the `bridgelet_wallet` entry from localStorage when a wallet is disconnected
 
+## Analytics Identifiers (`bridgelet_anonymous_id`, `bridgelet_session_id`)
+
+`docs/analytics-spec.md` §3.1 requires an `anonymous_id` (persisted) and a
+`session_id` (per visit). Both are browser storage, so both are in scope. Run
+this section **before** merging any change to what analytics writes.
+
+- [ ] `bridgelet_anonymous_id` stores only a client-generated UUID v4 — confirm it is not derived from an IP address, a wallet address, a claim token, a user agent, or any other user attribute
+- [ ] The value is generated in the browser and never transmitted to the SDK or backend as anything other than an analytics payload property
+- [ ] No claim token, wallet address, email address, or amount is written to this key, or reconstructed from it
+- [ ] `bridgelet_session_id` is session-scoped (cleared when the session ends) and not a durable identifier
+- [ ] An opted-out or `DNT: 1` visitor has **no** identifier minted at all — verify the check runs *before* generation, not merely before dispatch, because writing the UUID is itself a durable tracking artefact
+- [ ] The explicit opt-out key (if present) stores only the literal opt-out state, and clearing it does not leave a stale value behind
+- [ ] Confirm the analytics module cannot throw in a way that leaves a partially-written or malformed value at either key
+- [ ] Confirm no third-party analytics script reads or writes these keys directly (they are the module's private namespace: `bridgelet_`)
+
+**Mobile equivalent.** The Expo app stores `bridgelet_anonymous_id` in
+AsyncStorage and keeps `bridgelet_session_id` in memory only. Verify the same
+properties there, and confirm the value is in app-scoped sandboxed storage
+rather than `expo-secure-store` (which is for credentials, and this is not
+one).
+
 ## Other localStorage Usage Inventory
 - [ ] Document and verify all non-wallet localStorage usage in the frontend:
   - [ ] `bridgelet-theme`: Stores theme preference ('light'/'dark') in `frontend/components/theme-provider.tsx` and `frontend/app/layout.tsx` — confirm this only stores theme selection, no sensitive data

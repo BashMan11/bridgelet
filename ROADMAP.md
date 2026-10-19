@@ -10,6 +10,26 @@ This document outlines the development timeline, planned features, and community
 
 We are currently focused on delivering the Minimum Viable Product (MVP) which allows for the basic lifecycle of a Bridgelet account: creation, funding, and claiming (sweeping).
 
+## Tracked Workstreams
+
+### Analytics instrumentation (frontend + mobile)
+
+The product is a financial flow whose success is invisible without telemetry,
+so this is a first-class workstream rather than a documentation detail.
+`docs/analytics-spec.md` defines 34 events plus a mobile extension (§10) and a
+§3.1 base payload; `docs/analytics-kpi-definitions.md` tracks, per KPI,
+whether its constituent events actually fire.
+
+- [x] Base payload implemented end to end (`frontend/lib/analytics.ts`)
+- [x] Sender journey instrumentation (events, conditional properties, §6 error types)
+- [x] Recipient journey instrumentation (events, entry channels, error classification)
+- [x] Mobile sink, base payload and screen tracking
+- [x] KPI query definitions with per-KPI readiness status
+- [ ] **Decide the analytics provider (§9.1)** — blocks volume testing and dashboard build
+- [ ] Consent UI exposing the opt-out gate (the gate exists; nothing surfaces it to a user yet)
+- [ ] Dashboard layer built against the KPI definitions, with `Payment Created` as the success criterion
+- [ ] Volume and failure testing against a staging ingest endpoint (`docs/analytics-load-testing.md`)
+
 ## 2026 Timeline
 
 ### Q1 2026: MVP Completion 🏁
@@ -43,7 +63,9 @@ We are currently focused on delivering the Minimum Viable Product (MVP) which al
   - [ ] Release `bridgelet-ui` reference implementation (Next.js)
   - [x] **Mobile Client (`bridgelet-mobile`)**: React Native / Expo native app architecture, SDK API client, test suite, and CI coverage
   - [ ] **Analytics instrumentation (frontend + mobile)**: Implement spec'd event tracking (`docs/analytics-spec.md`) across sender and recipient funnels with consent gating and privacy controls
-  - [ ] Mobile NFC & QR claim code scanning integrations
+  - [ ] **Mobile push notifications & engagement telemetry**: Introduce real push notification service with lifecycle tracking (`Notification Received`, `Notification Opened`, `Notification Cleared`) to measure re-engagement funnels (#703)
+  - [ ] **Mobile NFC & QR claim code scanning integrations**: Implement in-app scanner (`QRCodeScanner.tsx`) with entry telemetry (`entry_channel: "qr_scan"` and/or `QR Code Scanned`) feeding Recipient Entry Channel Distribution (#704)
+  - [ ] **Language detection & localization analytics**: Consider dedicated event category and telemetry for language auto-detection vs manual override if translation UX investment expands (#705)
 - **Network**
   - [ ] **Mainnet Beta Launch** (Limited pilot)
 

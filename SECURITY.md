@@ -167,6 +167,45 @@ We follow a coordinated disclosure process:
 - We may request an extension if the issue is particularly complex
 - We will work with you to coordinate the disclosure timeline
 
+## Analytics Data
+
+Analytics is in scope for this policy. The product handles wallet addresses,
+payment amounts and claim tokens, so "we only collect analytics" is not a
+neutral statement.
+
+**What the reference apps collect.** Interaction events carrying a §3.1 base
+payload: a randomly generated `anonymous_id`, a per-visit `session_id`, a
+coarse `device_type`, `app_version`, `network`, and a UTC `timestamp`. Some
+events additionally carry a `claim_id` and an `amount_usd_equiv`. Full field
+list: `docs/analytics-spec.md` §3.1–§3.2.
+
+**What is never collected.** Wallet addresses (public or secret), claim tokens,
+private or secret keys, message contents, recipient names or email addresses.
+A wallet address would identify a third party; a claim token is a bearer
+credential for the funds. Two consequences follow and are enforced in code:
+
+- The claim page loads **no** third-party script or asset, so a claim token
+  cannot leak via `Referer` (`docs/security-model.mdx`, T-16).
+- An explorer link is rendered only when a real transaction hash is available.
+  A claim token or account id in a `/tx/` URL resolves to nothing and would
+  hand a bearer credential to a third party, so no link is rendered instead.
+
+**Storage.** The identifiers live in browser storage only (`localStorage` /
+`sessionStorage` on web, AsyncStorage on mobile) and are not sent to the
+SDK. No claim token is ever persisted. Any change to what is written to browser
+storage must pass
+`bridgelet-product-audit/checklists/localstorage-data-exposure-checklist.md`
+before merge.
+
+**Opting out.** A visitor's browser **Do Not Track** signal suppresses every
+event and no identifier is minted; an explicit on-site opt-out suppresses
+everything independently of browser settings. Note that opted-out visitors
+record nothing, so any published usage figure is a lower bound.
+
+**Reporting.** Vulnerabilities in analytics collection or in the identifiers
+are security reports under this policy — report them to the contact below, not
+as a public issue.
+
 ## Security Best Practices
 
 ### For Integrators

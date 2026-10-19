@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { languageDetectionService, LanguageDetectionResult } from '../features/translate/languageDetection';
+import { JOURNEYS, track } from '../analytics/analytics';
 
 /**
  * Hook for real-time language detection with debouncing
@@ -95,6 +96,20 @@ export function useLanguageDetection(
    */
   const overrideLanguage = useCallback((language: string) => {
     setDetectedLanguage(language);
+    // Recorded here, not in the detection service: this is the one place a
+    // language is chosen by a person rather than inferred. Auto-detection and a
+    // manual pick produce the same `detectedLanguage`, so without this event
+    // there is no way to tell an engaged user who corrected the app from one
+    // whose message happened to be mis-detected.
+    track({
+      name: 'Language Detected',
+      params: {
+        journey: JOURNEYS.shared,
+        language,
+        detection_source: 'manual_override',
+        confidence: 1.0,
+      },
+    });
     if (onLanguageChange) {
       onLanguageChange(language, 1.0); // Full confidence when manually selected
     }

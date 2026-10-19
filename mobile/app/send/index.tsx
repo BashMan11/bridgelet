@@ -10,6 +10,7 @@ import {
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useThemeColors } from '../src/hooks/useThemeColors';
+import { useScreenTracking } from '../src/hooks/useScreenTracking';
 
 type ActivityItem = {
   id: string;
@@ -54,6 +55,8 @@ const statusColors: Record<ActivityItem['status'], string> = {
 };
 
 export default function SenderDashboardScreen() {
+  // §mobile analytics: record that this screen was opened.
+  useScreenTracking('sender_dashboard');
   const router = useRouter();
   const colors = useThemeColors();
   const [isLoading, setIsLoading] = useState(true);

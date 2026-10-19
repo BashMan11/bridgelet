@@ -27,12 +27,18 @@ reported anywhere yet. Neither marker means "ready".
 
 | KPI | Spec | Formula | Constituent events | Status |
 |-----|------|---------|--------------------|--------|
-| Claim Conversion Rate (CCR) | §8.1 | `Claim Succeeded ÷ Claim Verified × 100` | `Claim Verified` (implemented, PR #713), `Claim Succeeded` (#585) | ⬜ blocked on `Claim Succeeded` |
-| Time to Claim (TTC) | §8.1 | `median(Claim Succeeded.timestamp − Payment Created.timestamp)` matched on `claim_id` | `Payment Created` (#567), `Claim Succeeded` (#585) | ⬜ blocked |
-| Expiry Rate | §8.1 | `payments status "expired" with no Claim Succeeded ÷ Payment Created × 100` | `Payment Created` (#567), `Claim Succeeded` (#585), expiry-watch | ⬜ blocked |
-| End-to-end conversion (§7.3) | §7.3 | `Claim Succeeded ÷ Page Viewed (homepage) × 100` | `Page Viewed` (#558), `Claim Succeeded` (#585) | ⬜ blocked |
+| Claim Conversion Rate (CCR) | §8.1 | `Claim Succeeded ÷ Claim Verified × 100` | `Claim Verified`, `Claim Succeeded` (both wired) | ⬜ blocked on `Claim Succeeded` |
+| Time to Claim (TTC) | §8.1 | `median(Claim Succeeded.timestamp − Payment Created.timestamp)` matched on `claim_id` | `Payment Created`, `Claim Succeeded` (both wired) | ⏳ unverified |
+| Expiry Rate | §8.1 | `payments status "expired" with no Claim Succeeded ÷ Payment Created × 100` | `Payment Created`, `Claim Succeeded` (both wired), payment records | ⏳ unverified |
+| End-to-end conversion (§7.3) | §7.3 | `Claim Succeeded ÷ Page Viewed (homepage) × 100` | `Page Viewed`, `Claim Succeeded` (both wired) | ⏳ unverified |
 | Claim Failure Rate | §8.2 | `Claim Failed ÷ Claim Submitted × 100` | `Claim Submitted`, `Claim Failed` (both implemented) | ⏳ unverified — query written, export check outstanding |
 | Asset Distribution | §8.2 | `count(Payment Created) grouped by asset_type ÷ total Payment Created × 100` | `Payment Created` (implemented) | ⏳ unverified — query written, export check outstanding |
+| Reclaim Rate | §8.1 | `Funds Reclaimed ÷ expired payments × 100` | `Funds Reclaimed` | ⬜ blocked — no reclaim UI exists |
+| Sender Activation Rate | §8.1 | `Payment Created ÷ Page Viewed (homepage) × 100` | `Page Viewed`, `Payment Created` | ⏳ unverified — query written, export check outstanding |
+| Share Method Distribution | §8.2 | `count(Claim Link Shared) grouped by share_method ÷ total Claim Link Shared × 100` | `Claim Link Shared` (fires; only `whatsapp` emitted) | ⏳ unverified — see channel-coverage note |
+| Recipient Entry Channel Distribution | §8.2 | `count(Claim Page Opened) grouped by entry_channel ÷ total Claim Page Opened × 100` | `Claim Page Opened` | ⏳ unverified — query written, export check outstanding |
+| Viral K-Factor | §8.2 | `Sender Signup CTA Clicked ÷ distinct claim_id that reached Claim Success Viewed` | `Claim Success Viewed`, `Sender Signup CTA Clicked` | ⏳ unverified — query written, export check outstanding |
+| Wallet Address Validation Failure Rate | §8.2 | `Wallet Address Validation Failed ÷ Wallet Address Entered × 100` | `Wallet Address Entered`, `Wallet Address Validation Failed` | ⬜ blocked on `Wallet Address Entered` |
 
 ---
 
@@ -76,10 +82,10 @@ FROM (
 ) t
 ```
 
-**Requirement ahead of this query:** `Payment Created` (#567) must be
-implemented with its `claim_id` payload property, and `Claim Succeeded`
-(#585) must emit a matching `claim_id`. Until both fire, TTC is
-undefined-in-practice (blocked).
+**Requirement ahead of this query:** both events must emit a matching
+`claim_id`. They do, so the query is runnable — but it has never been run
+against a real export (readiness gate 2), so the number may not be reported
+yet.
 
 ## Expiry Rate
 
@@ -107,9 +113,8 @@ WHERE e.name = 'Payment Created';
 **Requirement ahead of this query:** the expiry source of truth is the
 payment record's backend `status` (`expired`), not an analytics event, so
 the numerator must be computed against payment records joined on `claim_id`
-to `Claim Succeeded`. Until `Payment Created` (#567) emits naming-compatible
-`claim_id`s and `Claim Succeeded` (#585) exists, this KPI is
-undefined-in-practice (blocked).
+to `Claim Succeeded`. Both events emit `claim_id` today, so the query is
+runnable — readiness gate 2 (a real export) is what is outstanding.
 
 ## End-to-end conversion (§7.3)
 
@@ -128,9 +133,9 @@ events are linked only through the invite/referrer chain. Because of this,
 §7.3 treats end-to-end conversion as an approximate census ratio, not a
 per-claim join, unless a cross-journey `referrer`/`utm` join is added.
 
-**Blocked on:** `Page Viewed` (#558), `Payment Created` (#567), and
-`Claim Succeeded` (#585) — plus the sender-journey events documented in the
-Sender Activation Funnel tracker.
+**Blocked on readiness gate 2.** All four events fire from production code;
+the query has never been run against a real event export, so the ratio may not
+be reported anywhere yet.
 
 ## Claim Failure Rate
 
@@ -212,15 +217,13 @@ before reporting a number:**
    up to three times internally (`claim-retry.ts:70`–`:106`) and emits nothing
    per retry, so `attempt_number` counts user re-submissions, not HTTP
    attempts. Do not chart it as retry depth.
-4. **The rest of this table is stale about `Claim Succeeded`.**
-   `analytics.claimSucceeded()` exists and is called from
-   `claim-page-client.tsx:191` and `:317`, so the "blocked on `Claim
-   Succeeded` (#585)" markers above look out of date for the *client-side*
-   signal. §9.2 still marks `Claim Succeeded` "server-side preferred", so
-   #585's blocker may be the authoritative server emission rather than the
-   client one. Left unchanged here because #585's acceptance criteria are
-   not visible from this repo — the maintainer should re-check before relying
-   on those rows.
+4. **Client-side `Claim Succeeded` exists; the authoritative one may not.**
+   `analytics.claimSucceeded()` is called from `claim-page-client.tsx`, and
+   §9.2 still marks `Claim Succeeded` "server-side preferred". If the SDK later
+   emits a server-side `Claim Succeeded` for the same `claim_id`, every query
+   above that counts that event must deduplicate across the two sources or the
+   denominator and numerator will both double-count. Until a server-side
+   emission exists, treat the client event as the only source.
 5. **Scope:** recipients who never reach the submission screen (expired link,
    malformed link) produce no `Claim Submitted` row at all, so this is a rate
    conditional on reaching submission, not on every claim-link open. Use
@@ -298,6 +301,257 @@ ORDER BY distinct_payments DESC;
 4. **Readiness:** gate 1 is met (`Payment Created` fires from production code
    at `confirm-step.tsx:132`, after `createEphemeralAccount` resolves); gate 2
    is not. Status stays `⏳ unverified`.
+
+## Reclaim Rate
+
+**Formula (§8.1):** `(Funds Reclaimed) / (expired payments) × 100`.
+
+**Query shape:**
+
+```sql
+SELECT
+  count(DISTINCT r.props->>'message_id') AS reclaims,
+  (SELECT count(*) FROM payments WHERE status = 'expired') AS expired,
+  ROUND(
+    count(DISTINCT r.props->>'message_id')::numeric
+    / NULLIF((SELECT count(*) FROM payments WHERE status = 'expired'), 0) * 100,
+    2
+  ) AS reclaim_rate_percent
+FROM events r
+WHERE r.name = 'Funds Reclaimed'
+```
+
+**Blocked.** The frontend has no reclaim affordance at all: `send-history.tsx`
+is read-only and the SDK client exposes no reclaim method, so there is no UI
+point where `Funds Reclaimed` could fire. The query above is written so it is
+ready the moment that exists — and the numerator must additionally be split by
+`reclaim_reason` (`expired` vs `cancelled`) once §4.5 carries it, because an
+expiry reclaim and a cancellation reclaim are different user situations.
+
+## Sender Activation Rate
+
+**Formula (§8.1):** `(Payment Created) / (Page Viewed on the homepage) × 100`.
+
+**Query shape:**
+
+```sql
+SELECT
+  (SELECT count(DISTINCT props->>'message_id') FROM events
+     WHERE name = 'Payment Created') AS activated,
+  (SELECT count(DISTINCT props->>'message_id') FROM events
+     WHERE name = 'Page Viewed' AND props->>'page' = 'homepage') AS visitors,
+  ROUND(
+    (SELECT count(DISTINCT props->>'message_id') FROM events
+       WHERE name = 'Payment Created')::numeric
+    / NULLIF((SELECT count(DISTINCT props->>'message_id') FROM events
+       WHERE name = 'Page Viewed' AND props->>'page' = 'homepage'), 0) * 100,
+    2
+  ) AS sender_activation_percent
+```
+
+**Note:** `Page Viewed` currently fires only from `page-view-tracker.tsx`,
+which is mounted on the homepage alone. That makes this KPI correct today and
+means it is *not* a site-wide conversion rate — if the tracker is later mounted
+on other routes, the `page = 'homepage'` filter becomes load-bearing and must
+stay in the query.
+
+## Share Method Distribution
+
+**Formula (§8.2):** breakdown of `Claim Link Shared` by `share_method`.
+
+```sql
+SELECT
+  props->>'share_method' AS share_method,
+  count(DISTINCT props->>'message_id') AS shares,
+  ROUND(
+    count(DISTINCT props->>'message_id')::numeric
+    / NULLIF(sum(count(DISTINCT props->>'message_id')) OVER (), 0) * 100,
+    2
+  ) AS share_percent
+FROM events
+WHERE name = 'Claim Link Shared'
+GROUP BY 1
+ORDER BY shares DESC
+```
+
+**Coverage caveat — read this before reporting the split.** The spec defines
+`share_method` as `sms | email | whatsapp | qr_code`, but the only share the
+UI currently offers is WhatsApp, so this query will return a single row at
+100% `whatsapp`. That is a real number, not a broken query. A distribution
+reported as "WhatsApp 100%" is measuring the **absence of other share
+affordances**, and must be labelled as such. The funnel's stage-7 drop-off
+("share vs just copy") should be read alongside `Claim Link Copied`, which is
+counted separately and is not part of this denominator.
+
+## Recipient Entry Channel Distribution
+
+**Formula (§8.2):** breakdown of `Claim Page Opened` by `entry_channel`.
+
+```sql
+SELECT
+  props->>'entry_channel' AS entry_channel,
+  count(DISTINCT props->>'message_id') AS opens,
+  ROUND(
+    count(DISTINCT props->>'message_id')::numeric
+    / NULLIF(sum(count(DISTINCT props->>'message_id')) OVER (), 0) * 100,
+    2
+  ) AS share_percent
+FROM events
+WHERE name = 'Claim Page Opened'
+GROUP BY 1
+ORDER BY opens DESC
+```
+
+**Note:** §5.1 defines the channel vocabulary as `sms | email | whatsapp |
+qr_scan | deep_link | direct | unknown`. `qr_scan` is mobile-only, so a
+web-only dataset will show a structural zero for it rather than a missing
+value — that is expected, not a gap. `direct` means "an https claim link with
+no referral signal" and `unknown` means the channel could not be determined;
+if `unknown` dominates, the classifier is not reading the campaign parameters
+that integrators are actually passing, which is a tracking-configuration
+problem rather than a user-behaviour finding.
+
+## Viral K-Factor (Recipient → Sender)
+
+**Formula (§8.2):** the rate at which recipients become senders via the
+post-claim CTA.
+
+```sql
+SELECT
+  count(DISTINCT s.props->>'claim_id') AS converted_recipients,
+  count(DISTINCT v.props->>'claim_id') AS successful_claims,
+  ROUND(
+    count(DISTINCT s.props->>'claim_id')::numeric
+    / NULLIF(count(DISTINCT v.props->>'claim_id'), 0),
+    3
+  ) AS k_factor
+FROM events v
+LEFT JOIN events s
+  ON s.name = 'Sender Signup CTA Clicked'
+ AND s.props->>'claim_id' = v.props->>'claim_id'
+WHERE v.name = 'Claim Success Viewed'
+```
+
+**Caveat — this measures intent, not conversion.** `Sender Signup CTA Clicked`
+records that the recipient tapped "Create your own payment link"; it says
+nothing about whether they then completed a payment. Read it as an upper bound
+on the loop, and pair it with `Page Viewed` / `Send Form Viewed` on the
+sender side for the closing half. A K-factor above 1 from this query alone is
+not evidence of a viral loop.
+
+## Wallet Address Validation Failure Rate
+
+**Formula (§8.2):** `(Wallet Address Validation Failed) / (Wallet Address Entered) × 100`.
+
+**Blocked on `Wallet Address Entered`,** which has no call site yet. Note the
+denominator problem this will surface: validation failures fire while the
+recipient is *typing* (on the transition into an invalid value), whereas a
+successful entry fires on submit. One session can therefore produce several
+validation failures and at most one entry, so the ratio measures
+per-attempt friction, not a share of recipients. Aggregate per
+`session_id` and report the median failures per session instead of a raw
+ratio, or the number will exceed 100% and look like a bug.
+
+---
+
+## Funnel query definitions (§7.1–§7.3)
+
+The three funnels in §7 are staged views over the same event stream. They are
+computed per `session_id` within a `session_id`-scoped window rather than by
+joining across journeys, because sender and recipient events for one payment
+are only linked through `claim_id` (available) — never through identity.
+
+**Sender Activation Funnel (§7.1)** — the per-stage drop-off column in §7.1
+is `1 − (stage n+1 ÷ stage n)` over a shared `session_id`:
+
+```sql
+WITH stages AS (
+  SELECT session_id,
+    bool_or(name = 'Page Viewed')            AS s1,
+    bool_or(name = 'Send Form Started')      AS s2,
+    bool_or(name = 'Send Form Completed')    AS s3,
+    bool_or(name = 'Wallet Connected')       AS s4,
+    bool_or(name = 'Payment Confirmed')      AS s5,
+    bool_or(name = 'Payment Created')        AS s6,
+    bool_or(name = 'Claim Link Shared')      AS s7
+  FROM events
+  GROUP BY session_id
+)
+SELECT
+  count(*) FILTER (WHERE s1) AS stage_1,
+  count(*) FILTER (WHERE s2) AS stage_2,
+  count(*) FILTER (WHERE s3) AS stage_3,
+  count(*) FILTER (WHERE s4) AS stage_4,
+  count(*) FILTER (WHERE s5) AS stage_5,
+  count(*) FILTER (WHERE s6) AS stage_6,
+  count(*) FILTER (WHERE s7) AS stage_7
+FROM stages;
+```
+
+`bool_or` per session is what makes this robust: a session that re-enters the
+send form counts once per stage rather than inflating whichever stage it
+revisited.
+
+**Recipient Claim Funnel (§7.2)** — the same shape over
+`Claim Page Opened` → `Claim Verified` → `Claim CTA Clicked` →
+`Claim Submitted` → `Claim Succeeded`.
+
+**Full End-to-End Funnel (§7.3)** — collapses to
+`Claim Succeeded ÷ Page Viewed (homepage) × 100`, computed as a census ratio
+over a shared attribution window rather than a per-claim join, since the sender
+and recipient of one payment are different people on different devices. This
+is a **ratio of two unrelated populations** and must never be presented as a
+per-payment conversion rate.
+
+**Abandonment is the absence of the next stage.** There is no abandonment
+event (see §7.1). Before attributing a drop-off to a specific cause, check for
+the paired failure event first — a session that emitted `Payment Creation
+Failed` or `Claim Failed` was already explained, and counting it again as
+abandonment double-counts it.
+
+---
+
+## Operational metrics (§8.3)
+
+§8.3 names "Operational Metrics" without enumerating what to audit against.
+This is that list. Each row states the metric, the events it derives from, and
+what an alert on it would mean. Metrics marked *(needs a backend source)* are
+not computable from analytics events alone.
+
+| Metric | Derived from | Alert means |
+| --- | --- | --- |
+| Event volume per hour, by event name | All events | A sudden drop to zero is an instrumentation or provider failure, not a traffic change |
+| Base-payload completeness | §3.1 fields present on sampled events | A missing field means an emitter bypassed `track()` |
+| `Error Displayed` rate by `error_type` | `Error Displayed` | A spike in `network_unavailable` is an outage; `unknown` above ~5% means the taxonomy is not being applied |
+| Duplicate `message_id` rate | §9.4 `message_id` | Non-zero means a double-submit path exists that the dedup store did not catch |
+| DNT / opt-out suppression rate | Not derivable from the stream | Must be counted client-side; record it beside any reported KPI |
+| Claim settle latency (`sweep_duration_ms`) | `Claim Succeeded.sweep_duration_ms` | Rising p95 means the sweep path is degrading |
+| Verification latency (`verification_time_ms`) | `Claim Verified.verification_time_ms` | Rising p95 means the backend claim-verify endpoint is slowing |
+| Provider delivery errors | Client logs | Any sustained rate means events are being lost silently |
+| Mobile crash rate | §10 `Crash Reported` | Any sustained rise is a regression in a released build |
+| SDK error rate by code *(needs a backend source)* | `BridgeletApiError.statusCode` | 5xx cluster growth is an SDK incident |
+| Claim success vs payment created (ratio) | `Claim Created` vs `Claim Succeeded` | A widening gap means payments are being funded but never claimed |
+| Notification → claim rate (§10) | `Notifications Cleared`, `Claim Page Opened` | Low rate means the notification surface is not driving engagement |
+
+---
+
+## Where these numbers are computed
+
+There is **no dashboard or BI code in this repository** — no `queries/`,
+`dashboards/`, dbt project or SQL directory exists here, and none is planned.
+This document is therefore the canonical, version-controlled definition of each
+KPI: the formula from §8, the exact events and join keys, and the query shape
+that implements it. The queries above are deliberately written against a
+generic event schema (`events(name, props, timestamp)`) so they can be
+translated into whatever the committed provider's query language is.
+
+If a dashboard is built somewhere else, this document is the thing it must be
+checked against, in both directions: a KPI reported on a dashboard must match
+a definition here, and a definition here with no corresponding dashboard is not
+a reported number. Whichever provider is committed (§9.1 is still undecided),
+the definitions here do not change.
+
+---
 
 ---
 

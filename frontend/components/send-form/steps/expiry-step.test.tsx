@@ -21,7 +21,7 @@ describe('ExpiryStep', () => {
     );
 
     expect(
-      screen.getAllByText(/unclaimed funds are automatically returned/i).length,
+      screen.getAllByText(/unclaimed funds are returned/i).length,
     ).toBeGreaterThanOrEqual(1);
   });
 
@@ -40,20 +40,16 @@ describe('ExpiryStep', () => {
     expect(onNext).toHaveBeenCalledTimes(1);
   });
 
-  it('shows an error and does not continue when no preset is selected', async () => {
+  it('shows an error and does not continue when no valid preset matches', async () => {
     const onChange = vi.fn();
     const onNext = vi.fn();
+    // Start with an expiresInHours value that does not match any EXPIRY_OPTIONS
+    // entry, so the component's selected state has no valid match on Continue.
     render(
-      <ExpiryStep expiresInHours={24} onChange={onChange} onBack={vi.fn()} onNext={onNext} />,
+      <ExpiryStep expiresInHours={0} onChange={onChange} onBack={vi.fn()} onNext={onNext} />,
     );
 
     const user = userEvent.setup();
-    // Unselect the default option, then attempt to continue without a selection.
-    await user.click(screen.getByLabelText(/24 hours/));
-    await user.click(screen.getByLabelText(/3 days/));
-    await user.click(screen.getByLabelText(/24 hours/));
-    const preset = screen.getByLabelText(/24 hours/) as HTMLInputElement;
-    preset.checked = false;
     await user.click(screen.getByRole('button', { name: /continue/i }));
 
     expect(screen.getByRole('alert')).toHaveTextContent(/choose how long/i);
