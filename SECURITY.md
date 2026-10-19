@@ -97,6 +97,14 @@ Security issues in the following areas are within scope:
 - Secret management issues
 - Network security concerns
 
+#### Frontend Analytics & Client-Side Data Handling
+
+- Analytics identifiers and payloads produced by the frontend, as defined in `docs/analytics-spec.md`
+- The `localStorage`-persisted `anonymous_id` and the `sessionStorage` `session_id`: their generation, retention, and erasure
+- Claim-derived values that appear in analytics payloads (`claim_id`, `amount_usd_equiv`) and any risk of the claim token — a bearer credential — reaching an analytics store
+- The Do Not Track (`DNT: 1`) opt-out path, including the guarantee that no identifier is minted for a visitor who opted out
+- Keeping third-party analytics scripts off `/claim/[token]` so the claim token is not leaked via `Referer`
+
 ### Out of Scope
 
 The following are generally out of scope:
@@ -123,6 +131,22 @@ Bridgelet implements a multi-layered security approach:
 
 For detailed information about our security architecture, threat model, and security assumptions, please refer to our [Security Model Documentation](./docs/security-model.pdf).
 
+### Analytics & Client-Side Data Handling
+
+Analytics data is part of the product's security posture, not an auxiliary concern. The frontend stores an `anonymous_id` in `localStorage` and a `session_id` in `sessionStorage`, and emits event payloads that can include `claim_id` and `amount_usd_equiv`. Because the claim token is a bearer credential (`docs/analytics-server-vs-client-decision.md` §4.2), how it is handled in payloads and how long analytics data is kept are security-relevant decisions.
+
+Controls, and the documents that record their current status:
+
+| Concern | Where it is defined / reviewed |
+|---|---|
+| No PII in payloads; wallet addresses included only where the spec allows | `docs/analytics-spec.md` §3.1 |
+| Browser Do Not Track (`DNT: 1`) suppresses all events and mints no identifier | `docs/analytics-spec.md` §9.5; `frontend/lib/analytics.ts` |
+| `anonymous_id` / `session_id` storage inventory, retention and erasure gaps | `docs/localstorage-data-exposure-audit.md`, reviewed against `bridgelet-product-audit/checklists/localstorage-data-exposure-checklist.md` |
+| `claim_id` / `user_agent` exposure and the client- vs server-side emission decision | `docs/analytics-server-vs-client-decision.md` §4.2 |
+| Data-subject rights for analytics data | `docs/GDPR_COMPLIANCE.md` |
+
+The `localStorage` exposure audit and its checklist are the standing review tool for this class of concern and must be re-run whenever what the frontend persists changes. Analytics-specific vulnerabilities — for example a payload that leaks the claim token to a third-party script, or a bypass of the DNT opt-out — are in scope for security reports.
+
 ## Disclosure Policy
 
 ### Coordinated Disclosure
@@ -142,6 +166,45 @@ We follow a coordinated disclosure process:
 - If you plan to publicly disclose the vulnerability, please give us at least **90 days** notice
 - We may request an extension if the issue is particularly complex
 - We will work with you to coordinate the disclosure timeline
+
+## Analytics Data
+
+Analytics is in scope for this policy. The product handles wallet addresses,
+payment amounts and claim tokens, so "we only collect analytics" is not a
+neutral statement.
+
+**What the reference apps collect.** Interaction events carrying a §3.1 base
+payload: a randomly generated `anonymous_id`, a per-visit `session_id`, a
+coarse `device_type`, `app_version`, `network`, and a UTC `timestamp`. Some
+events additionally carry a `claim_id` and an `amount_usd_equiv`. Full field
+list: `docs/analytics-spec.md` §3.1–§3.2.
+
+**What is never collected.** Wallet addresses (public or secret), claim tokens,
+private or secret keys, message contents, recipient names or email addresses.
+A wallet address would identify a third party; a claim token is a bearer
+credential for the funds. Two consequences follow and are enforced in code:
+
+- The claim page loads **no** third-party script or asset, so a claim token
+  cannot leak via `Referer` (`docs/security-model.mdx`, T-16).
+- An explorer link is rendered only when a real transaction hash is available.
+  A claim token or account id in a `/tx/` URL resolves to nothing and would
+  hand a bearer credential to a third party, so no link is rendered instead.
+
+**Storage.** The identifiers live in browser storage only (`localStorage` /
+`sessionStorage` on web, AsyncStorage on mobile) and are not sent to the
+SDK. No claim token is ever persisted. Any change to what is written to browser
+storage must pass
+`bridgelet-product-audit/checklists/localstorage-data-exposure-checklist.md`
+before merge.
+
+**Opting out.** A visitor's browser **Do Not Track** signal suppresses every
+event and no identifier is minted; an explicit on-site opt-out suppresses
+everything independently of browser settings. Note that opted-out visitors
+record nothing, so any published usage figure is a lower bound.
+
+**Reporting.** Vulnerabilities in analytics collection or in the identifiers
+are security reports under this policy — report them to the contact below, not
+as a public issue.
 
 ## Security Best Practices
 
@@ -167,6 +230,7 @@ If you're contributing to Bridgelet:
 3. **Test Coverage:** Include security test cases for new features
 4. **Secrets Management:** Never commit secrets, keys, or credentials to the repository
 5. **Follow Guidelines:** Adhere to secure coding practices outlined in [CONTRIBUTING.md](./CONTRIBUTING.md)
+6. **Analytics & client-side data:** Follow `docs/analytics-spec.md` for payload shape and privacy rules, and check `docs/localstorage-data-exposure-audit.md` when you add or change persisted client state
 
 ## Security Hardening
 
@@ -253,6 +317,6 @@ This security policy is licensed under [CC BY 4.0](https://creativecommons.org/l
 
 ---
 
-**Last Updated:** January 25, 2026
+**Last Updated:** October 17, 2026
 
 **Thank you for helping keep Bridgelet and our users safe! 🔒**

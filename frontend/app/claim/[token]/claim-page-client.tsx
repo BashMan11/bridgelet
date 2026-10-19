@@ -1,13 +1,21 @@
 'use client';
 
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, type RefObject } from 'react';
 import { ClaimStatusCard } from '@/components/claim-status-card';
 import { AccountStatus } from '@/lib/api/types';
 import { BridgeletClient } from '@/lib/api/client';
 import { ClaimView, loadClaimView, markTokenClaimed } from '@/lib/claim-view';
 import { submitClaimWithRetry, pollClaimStatus } from '@/lib/claim-retry';
 import { ClaimError, claimErrorCodeFromApiCode, getClaimErrorMessage } from '@/lib/claim-errors';
-import { analytics, daysRemainingUntil, type ClaimEntryChannel } from '@/lib/analytics';
+import { validateClaimToken } from '@/lib/validate-token';
+import {
+  analytics,
+  daysRemainingUntil,
+  ERROR_TYPES,
+  toAmountUsdEquiv,
+  type ClaimEntryChannel,
+} from '@/lib/analytics';
+import { getXlmUsdRate, stroopsToXlm } from '@/lib/xlm-price';
 
 interface ClaimPageClientProps {
   token: string;
@@ -28,9 +36,14 @@ function claimEntryChannel(): ClaimEntryChannel {
     const params = new URLSearchParams(window.location.search);
     const flagged = (params.get('channel') ?? params.get('src') ?? params.get('utm_source') ?? '')
       .toLowerCase();
+    if (flagged.includes('qr')) return 'qr_scan';
     if (flagged.includes('whatsapp') || flagged.includes('wa')) return 'whatsapp';
     if (flagged.includes('mail') || flagged.includes('email')) return 'email';
     if (flagged.includes('sms') || flagged.includes('text')) return 'sms';
+    // Opened via the app's custom scheme (bridgelet://claim/<token>), which is
+    // a different acquisition path from a pasted https link.
+    const protocol = window.location.protocol.toLowerCase();
+    if (protocol !== '' && protocol !== 'http:' && protocol !== 'https:') return 'deep_link';
     const referrer = document.referrer;
     if (referrer) {
       const host = new URL(referrer).hostname.toLowerCase();
@@ -42,6 +55,23 @@ function claimEntryChannel(): ClaimEntryChannel {
   } catch {
     return 'unknown';
   }
+}
+
+/**
+ * §3.2 `amount_usd_equiv` for a claim, when amount and rate are known.
+ * Takes primitives rather than the `ClaimView` so passing it from inside a
+ * memoized callback doesn't defeat the React Compiler's memoization.
+ */
+function usdEquivOf(
+  amountStroops: string | undefined,
+  assetCode: string | undefined,
+  xlmUsdRate: RefObject<number | undefined>,
+) {
+  return toAmountUsdEquiv(
+    amountStroops ? stroopsToXlm(amountStroops) : undefined,
+    assetCode,
+    xlmUsdRate.current,
+  );
 }
 
 export function ClaimPageClient({ token, supportEmail, initialView }: ClaimPageClientProps) {
@@ -58,10 +88,42 @@ export function ClaimPageClient({ token, supportEmail, initialView }: ClaimPageC
   // Timestamp of the most recent claim-submit intent, used for
   // `Claim Succeeded.sweep_duration_ms` (§5.3).
   const submittedAtRef = useRef(0);
+  // Latest XLM/USD rate, used for the §3.2 `amount_usd_equiv` property.
+  // Fetched in the background so a slow price API never delays the claim UI;
+  // events that fire before it resolves simply omit the property.
+  const xlmUsdRateRef = useRef<number | undefined>(undefined);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getXlmUsdRate().then((rate) => {
+      if (!cancelled) xlmUsdRateRef.current = rate;
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     // Funnel start: fire immediately on open, before token verification.
     analytics.claimPageOpened({ claimId: token, entryChannel: claimEntryChannel() });
+
+    // §6 `invalid_token` — a token that cannot be a token is classified
+    // before any request is made. Previously a malformed link reached the API,
+    // came back 401, and was reported as `expired_token`, so every corrupt or
+    // mistyped link inflated the expiry numbers with what was really a
+    // bad-URL problem.
+    const tokenCheck = validateClaimToken(token);
+    if (!tokenCheck.valid) {
+      analytics.errorDisplayed({
+        journey: 'recipient',
+        claimId: token,
+        errorType: ERROR_TYPES.invalid_token,
+        errorCode: 'TOKEN_MALFORMED',
+        sourceScreen: 'claim_landing',
+      });
+      setView({ status: AccountStatus.FAILED, loadErrorCode: 'TOKEN_MALFORMED' });
+      return;
+    }
 
     let cancelled = false;
     const verifiedAt = Date.now();
@@ -73,11 +135,16 @@ export function ClaimPageClient({ token, supportEmail, initialView }: ClaimPageC
           analytics.claimVerified({
             claimId: token,
             assetType: result.assetCode,
+            amountUsdEquiv: usdEquivOf(result.amountStroops, result.assetCode, xlmUsdRateRef),
             expiryDaysRemaining: result.expiresAt ? daysRemainingUntil(result.expiresAt) : undefined,
             verificationTimeMs: Date.now() - verifiedAt,
           });
 // The review/confirm claim screen is this panel (§5.3).
-          analytics.claimConfirmationViewed({ claimId: token, assetType: result.assetCode });
+          analytics.claimConfirmationViewed({
+            claimId: token,
+            assetType: result.assetCode,
+            amountUsdEquiv: usdEquivOf(result.amountStroops, result.assetCode, xlmUsdRateRef),
+          });
         } else if (result.status === AccountStatus.CLAIMED) {
           // Token is valid but the funds were already swept (§6 `already_claimed`).
           analytics.errorDisplayed({
@@ -162,7 +229,11 @@ export function ClaimPageClient({ token, supportEmail, initialView }: ClaimPageC
    */
   const handleClaim = useCallback(
     async (destinationAddress: string) => {
-      analytics.claimCtaClicked({ claimId: token, assetType: view?.assetCode });
+      analytics.claimCtaClicked({
+        claimId: token,
+        assetType: view?.assetCode,
+        amountUsdEquiv: usdEquivOf(view?.amountStroops, view?.assetCode, xlmUsdRateRef),
+      });
       if (submissionInFlight.current) {
         // Guard: prevent concurrent submissions for the same token.
         throw new ClaimError("NETWORK_ERROR", "A claim is already being processed. Please wait.");
@@ -171,7 +242,11 @@ export function ClaimPageClient({ token, supportEmail, initialView }: ClaimPageC
       const currentAttempt = ++attemptNumberRef.current;
       submittedAtRef.current = Date.now();
       // Recipient submitted the claim (intent only, pre-chain-confirmation) (§5.3).
-      analytics.claimSubmitted({ claimId: token, assetType: view?.assetCode });
+      analytics.claimSubmitted({
+        claimId: token,
+        assetType: view?.assetCode,
+        amountUsdEquiv: usdEquivOf(view?.amountStroops, view?.assetCode, xlmUsdRateRef),
+      });
 
       try {
         const result = await submitClaimWithRetry(client, token, destinationAddress, {
@@ -191,6 +266,7 @@ export function ClaimPageClient({ token, supportEmail, initialView }: ClaimPageC
             analytics.claimSucceeded({
               claimId: token,
               assetType: view?.assetCode,
+              amountUsdEquiv: usdEquivOf(view?.amountStroops, view?.assetCode, xlmUsdRateRef),
               sweepDurationMs: Math.max(0, Date.now() - submittedAtRef.current),
             });
             setView((prev) => ({
@@ -207,6 +283,17 @@ export function ClaimPageClient({ token, supportEmail, initialView }: ClaimPageC
           case "alreadyClaimed": {
             // Token was already claimed (possibly by this session earlier).
             markTokenClaimed(token);
+            // §6 already_claimed — the recipient submitted a claim for a
+            // payment that had already been swept. Distinct from the same
+            // status discovered on page load, which the load path reports with
+            // source_screen 'claim_landing'.
+            analytics.errorDisplayed({
+              journey: 'recipient',
+              claimId: token,
+              errorType: ERROR_TYPES.already_claimed,
+              errorCode: 'ALREADY_CLAIMED',
+              sourceScreen: 'claim_result',
+            });
             setView((prev) => ({
               ...(prev ?? { status: AccountStatus.CLAIMED }),
               status: AccountStatus.CLAIMED,
@@ -222,6 +309,7 @@ export function ClaimPageClient({ token, supportEmail, initialView }: ClaimPageC
             analytics.claimFailed({
               claimId: token,
               assetType: view?.assetCode,
+              amountUsdEquiv: usdEquivOf(view?.amountStroops, view?.assetCode, xlmUsdRateRef),
               errorCode: 'SUBMISSION_FAILED_RETRYABLE',
               errorType: 'network_error',
               attemptNumber: currentAttempt,
@@ -268,6 +356,7 @@ export function ClaimPageClient({ token, supportEmail, initialView }: ClaimPageC
             analytics.claimFailed({
               claimId: token,
               assetType: view?.assetCode,
+              amountUsdEquiv: usdEquivOf(view?.amountStroops, view?.assetCode, xlmUsdRateRef),
               errorCode: apiErr?.code ?? apiErr?.message ?? 'unknown',
               errorType: 'transaction_failed',
               attemptNumber: currentAttempt,
@@ -326,6 +415,7 @@ export function ClaimPageClient({ token, supportEmail, initialView }: ClaimPageC
               analytics.claimSucceeded({
                 claimId: token,
                 assetType: view?.assetCode,
+                amountUsdEquiv: usdEquivOf(view?.amountStroops, view?.assetCode, xlmUsdRateRef),
                 sweepDurationMs: Math.max(0, Date.now() - submittedAtRef.current),
               });
               setView((prev) => ({
@@ -342,6 +432,23 @@ export function ClaimPageClient({ token, supportEmail, initialView }: ClaimPageC
               pollResult.status === AccountStatus.FAILED ||
               pollResult.status === AccountStatus.EXPIRED
             ) {
+              // The claim window elapsed (or the payment failed) while the
+              // recipient waited on an ambiguous submission. Previously the
+              // panel just swapped to the expired state with no event, so an
+              // expiry discovered here was invisible.
+              analytics.errorDisplayed({
+                journey: 'recipient',
+                claimId: token,
+                errorType:
+                  pollResult.status === AccountStatus.EXPIRED
+                    ? ERROR_TYPES.expired_token
+                    : ERROR_TYPES.unknown,
+                errorCode:
+                  pollResult.status === AccountStatus.EXPIRED
+                    ? 'TOKEN_EXPIRED'
+                    : 'CLAIM_SETTLEMENT_FAILED',
+                sourceScreen: 'claim_result',
+              });
               setView((prev) => ({
                 ...(prev ?? { status: AccountStatus.FAILED }),
                 status: pollResult.status,

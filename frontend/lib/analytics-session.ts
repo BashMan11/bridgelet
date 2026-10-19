@@ -14,9 +14,7 @@
 //     `sessionStorage` / `Date.now()` behind SSR and blocked-storage guards,
 //     and delegates to `resolveSessionId()`.
 //
-// **Not wired in yet.** `getSessionId()` in `lib/analytics.ts` still mints
-// once per tab lifetime. Activation is one import plus one delegation call;
-// see the hand-off note in the footer of this file.
+// Wired in (#846): `getSessionId()` in `lib/analytics.ts` delegates here.
 
 /** Inactivity window from `docs/analytics-spec.md` §9.3, in milliseconds. */
 export const SESSION_INACTIVITY_MS = 30 * 60 * 1000;
@@ -158,32 +156,15 @@ export function getSessionIdWithInactivity(generateId: () => string): string {
  * access, not on the method calls.
  */
 function browserSessionStorage(): SessionStorageLike | null {
-  if (typeof window === 'undefined' || typeof sessionStorage === 'undefined') return null;
   try {
-    return sessionStorage;
+    const w = typeof window !== 'undefined' ? (window as any) : (globalThis as any);
+    if (!w) return null;
+    const storage = w.sessionStorage;
+    if (!storage) return null;
+    return storage;
   } catch {
     // Storage blocked at the property-access level.
     return null;
   }
 }
 
-// ─── Hand-off: activating this module ────────────────────────────────────────
-//
-// `lib/analytics.ts` is owned by a parallel PR, so the wiring is deliberately
-// not made here. To activate, its owner makes two edits:
-//
-//   1. Add the import next to the other lib imports:
-//
-//        import { getSessionIdWithInactivity } from './analytics-session';
-//
-//   2. Replace the body of the existing `getSessionId()` with a single
-//      delegation, passing the module-private `generateUUID` so there is still
-//      exactly one UUID implementation:
-//
-//        export function getSessionId(): string {
-//          return getSessionIdWithInactivity(generateUUID);
-//        }
-//
-// Optional follow-up (not required for correctness): delete the local
-// `SESSION_ID_KEY` const in `lib/analytics.ts` and import it from here instead,
-// so the duplicated key literal has one owner.

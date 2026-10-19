@@ -1,3 +1,4 @@
+
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -75,6 +76,15 @@ vi.mock('./steps/confirm-step', () => ({
       <button onClick={onBack}>Back</button>
     </div>
   ),
+}));
+
+// ── Analytics mock ──────────────────────────────────────────────────────────
+
+vi.mock('@/lib/analytics', () => ({
+  analytics: {
+    sendFormViewed: vi.fn(),
+    sendFormCompleted: vi.fn(),
+  },
 }));
 
 describe('SendForm', () => {
@@ -263,5 +273,33 @@ describe('SendForm', () => {
         amountUsdEquiv: 1.25,
       }),
     );
+  });
+
+
+  // ── Analytics (#772) ──────────────────────────────────────────────────────
+
+  describe('Send Form Viewed (spec 4.2, issue #772)', () => {
+    beforeEach(() => {
+      vi.clearAllMocks();
+    });
+
+    it('fires analytics.sendFormViewed exactly once when the form is displayed', () => {
+      render(<SendForm />);
+
+      expect(analytics.sendFormViewed).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not re-fire sendFormViewed on step transitions', async () => {
+      const user = userEvent.setup();
+      render(<SendForm />);
+
+      await user.click(screen.getByRole('button', { name: 'Mock Connect' }));
+      await user.click(screen.getByRole('button', { name: 'Continue' })); // expiry
+      await user.click(screen.getByRole('button', { name: 'Continue' })); // details
+      await user.click(screen.getByRole('button', { name: 'Back' })); // back to details
+
+      expect(screen.getByText('Details step')).toBeInTheDocument();
+      expect(analytics.sendFormViewed).toHaveBeenCalledTimes(1);
+    });
   });
 });

@@ -27,9 +27,10 @@ import {
   ERROR_TYPES,
   expiryDaysFromHours,
   senderErrorType,
+  toAmountUsdEquiv,
   WALLET_PROVIDERS,
 } from '@/lib/analytics';
-import { amountUsdEquiv } from '@/lib/xlm-price';
+import { getXlmUsdRate } from '@/lib/xlm-price';
 
 /**
  * Default claim window for accounts created from the send form.
@@ -154,22 +155,36 @@ export function ConfirmStep({ state, usdRate, onBack }: ConfirmStepProps) {
   // Ensures the claim-link email is sent at most once per submission.
   const emailSentRef = useRef(false);
 
+  // Latest XLM/USD rate for the §3.2 `amount_usd_equiv` property. Cached by
+  // `getXlmUsdRate()`, so this normally resolves from the details step's fetch.
+  const xlmUsdRateRef = useRef<number | undefined>(undefined);
+
   const submitting = submitPhase !== 'idle' && submitPhase !== 'success';
 
-  const usdEquiv = amountUsdEquiv(state.amountXlm, state.assetCode, usdRate);
+  /** 3.2 `amount_usd_equiv` for the amount being sent, when known. */
+  function usdEquiv() {
+    return toAmountUsdEquiv(state.amountXlm, state.assetCode, xlmUsdRateRef.current);
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    void getXlmUsdRate().then((rate) => {
+      if (!cancelled) xlmUsdRateRef.current = rate;
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     analytics.paymentConfirmationViewed({
       assetType: state.assetCode,
+      amountUsdEquiv: toAmountUsdEquiv(state.amountXlm, state.assetCode, xlmUsdRateRef.current),
       expiryDays: expiryDaysFromHours(state.expiresInHours),
-      amountUsdEquiv: usdEquiv,
     });
-    // `usdEquiv` is derived from the two dependencies below; listing it keeps
-    // the effect honest if the derivation ever gains an input.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.assetCode, state.expiresInHours, usdEquiv]);
+  }, [state.assetCode, state.amountXlm, state.expiresInHours]);
 
-  // §4.4 `Payment Success Viewed` — the success screen is rendered by the
+  // 4.4 `Payment Success Viewed` - the success screen is rendered by the
   // early return below, so it is observed here rather than at the render
   // site. Gated on the account id so a re-render of the same success screen
   // cannot fire it twice.
@@ -178,9 +193,9 @@ export function ConfirmStep({ state, usdRate, onBack }: ConfirmStepProps) {
     analytics.paymentSuccessViewed({
       claimId: createdAccountId,
       assetType: state.assetCode,
-      amountUsdEquiv: usdEquiv,
+      amountUsdEquiv: usdEquiv(),
     });
-  }, [submitPhase, createdAccountId, state.assetCode, usdEquiv]);
+  }, [submitPhase, createdAccountId, state.assetCode]);
 
   function buildCreateAccountPayload() {
     return {
@@ -254,14 +269,18 @@ export function ConfirmStep({ state, usdRate, onBack }: ConfirmStepProps) {
       analytics.paymentCreated({
         claimId: account.accountId,
         assetType: state.assetCode,
+        amountUsdEquiv: usdEquiv(),
         expiryDays: expiryDaysFromHours(state.expiresInHours),
-        amountUsdEquiv: usdEquiv,
         confirmationTimeMs: confirmedAt.current != null ? Date.now() - confirmedAt.current : 0,
       });
       analytics.paymentDetailsViewed({ claimId: account.accountId, claimStatus: 'unclaimed' });
     } catch (err) {
       const info = classifyError(err);
       setErrorInfo(info);
+      analytics.paymentCreationFailed({
+        errorCode: info.code,
+        assetType: state.assetCode,
+      });
       if (err instanceof RateLimitError) {
         setRetryAfter(err.retryAfter);
       } else {
@@ -345,8 +364,8 @@ export function ConfirmStep({ state, usdRate, onBack }: ConfirmStepProps) {
     confirmedAt.current = Date.now();
     analytics.paymentConfirmed({
       assetType: state.assetCode,
+      amountUsdEquiv: usdEquiv(),
       expiryDays: expiryDaysFromHours(state.expiresInHours),
-      amountUsdEquiv: usdEquiv,
       walletType: 'Freighter',
       walletProvider: WALLET_PROVIDERS.freighter,
     });
