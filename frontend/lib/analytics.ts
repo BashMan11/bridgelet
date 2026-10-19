@@ -1,5 +1,6 @@
 // #118 – Privacy-respecting analytics events (Plausible-compatible, no PII)
 // Event names must match `docs/analytics-spec.md` `#### \`Event Name\`` headings exactly.
+import { getSessionIdWithInactivity } from './analytics-session';
 type ClaimEvent =
   | 'Page Viewed'
   | 'Send Form Viewed'
@@ -226,7 +227,6 @@ export function setAnalyticsOptedOut(optedOut: boolean): void {
 // ─── §3.1 Base Payload Identity fields ───────────────────────────────────────
 
 const ANONYMOUS_ID_KEY = 'bridgelet_anonymous_id';
-const SESSION_ID_KEY = 'bridgelet_session_id';
 
 /**
  * Generates a cryptographically-random UUID v4.
@@ -266,24 +266,15 @@ export function getAnonymousId(): string {
 }
 
 /**
- * Returns the session-scoped `session_id` for this browser tab/visit.
- * Generated once per session and stored in `sessionStorage`; reset when
- * the tab or browser session ends.
- * Returns an empty string in SSR or when storage is unavailable.
+ * Returns the session-scoped `session_id` for this browser visit
+ * (`docs/analytics-spec.md` §9.3): minted on first use, rotated after
+ * 30 minutes of inactivity, persisted in `sessionStorage`. Delegates to
+ * `lib/analytics-session.ts` (#633/#846) so the inactivity rule has one
+ * owner and its own tests. Empty string in SSR or when storage is
+ * unavailable (unchanged contract).
  */
 export function getSessionId(): string {
-  if (typeof window === 'undefined') return '';
-  try {
-    let id = sessionStorage.getItem(SESSION_ID_KEY);
-    if (!id) {
-      id = generateUUID();
-      sessionStorage.setItem(SESSION_ID_KEY, id);
-    }
-    return id;
-  } catch {
-    // sessionStorage unavailable.
-    return '';
-  }
+  return getSessionIdWithInactivity(generateUUID);
 }
 
 // ─── §6 Error taxonomy ────────────────────────────────────────────────────────
@@ -695,6 +686,14 @@ let warnedNoProvider = false;
  * 3. An in-memory queue, replayed once a provider appears.
  * 4. Console output in development, with payload-shape verification when
  *    NEXT_PUBLIC_ANALYTICS_VERIFY is enabled.
+ *
+ * Emission side (§9.2): every event is client-emitted today. The four
+ * "server-side preferred" events (`Payment Created`, `Claim Verified`,
+ * `Claim Succeeded`, `Claim Failed`) and the `Payment Confirmed` →
+ * `Payment Signed` rename are planned — with the client-context
+ * (session_id/device_type) contract — in
+ * `docs/analytics-server-vs-client-decision.md` (#845). Nothing moves until
+ * the SDK owns emission; do not dual-emit.
  */
 function track<E extends ClaimEvent>(event: E, props: EventPayloadMap[E]): void {
   if (typeof window === 'undefined') return;

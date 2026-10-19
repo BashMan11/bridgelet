@@ -222,7 +222,11 @@ describe('resolveSessionId (§9.3 inactivity window)', () => {
 
 describe('getSessionIdWithInactivity (browser entry point)', () => {
   beforeEach(() => {
-    sessionStorage.clear();
+    try {
+      sessionStorage.clear();
+    } catch {
+      // jsdom may not provide sessionStorage in some contexts; ignore
+    }
   });
 
   afterEach(() => {

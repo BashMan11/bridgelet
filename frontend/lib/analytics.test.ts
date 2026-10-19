@@ -1279,12 +1279,28 @@ describe('getSessionId (§3.1)', () => {
   });
 
   it('stores the id in sessionStorage under the expected key', () => {
-    getSessionId();
-    expect(sessionStorage.getItem('bridgelet_session_id')).not.toBeNull();
+    const id = getSessionId();
+    expect(sessionStorage.getItem('bridgelet_session_id')).toBe(id);
+  });
+
+  it('rotates the id after 30 minutes of inactivity (§9.3, via analytics-session)', () => {
+    const first = getSessionId();
+    const start = Date.now();
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(start + 30 * 60 * 1000 + 1000);
+      const second = getSessionId();
+      expect(second).not.toBe(first);
+      expect(second).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-/i);
+      expect(sessionStorage.getItem('bridgelet_session_id')).toBe(second);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
 describe('track() base-payload identity merge', () => {
+
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
