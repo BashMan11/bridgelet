@@ -874,6 +874,21 @@ export interface PaymentCreationFailedProps {
 }
 
 /**
+ * §4.5 Dashboard filter closed set: exactly one of "all", "unclaimed", "claimed", "expired".
+ */
+export const DASHBOARD_FILTERS = ['all', 'unclaimed', 'claimed', 'expired'] as const;
+export type DashboardFilter = (typeof DASHBOARD_FILTERS)[number];
+
+export interface DashboardViewedProps {
+  totalPayments: number;
+  activeFilter?: DashboardFilter;
+}
+
+export interface DashboardFilterAppliedProps {
+  filter: DashboardFilter;
+}
+
+/**
  * Conditional payload properties (`docs/analytics-spec.md` §3.2) are
  * included only on the events where they are relevant. Each helper below
  * returns the exact property key the spec expects, so event handlers can
@@ -1281,7 +1296,6 @@ export function daysRemainingUntil(iso: string): number | undefined {
  * the first real emitter may tighten them.
  */
 type WalletProviderPath = 'freighter' | 'lobstr' | 'generated' | 'unknown';
-type DashboardFilter = 'all' | 'unclaimed' | 'claimed' | 'expired';
 
 type EventPayloadShapes = {
   'Page Viewed': { page: string; entry_source?: EntrySource; journey?: Journey };
@@ -1776,6 +1790,28 @@ export const analytics = {
       ...(timeToClaimHours !== undefined ? { time_to_claim_hours: timeToClaimHours } : {}),
       ...(sweepDurationMs !== undefined ? { sweep_duration_ms: sweepDurationMs } : {}),
       entry_channel: entryChannel,
+    }),
+
+  /**
+   * §4.5 Dashboard Viewed — fires when the sender's payment dashboard is loaded.
+   */
+  dashboardViewed: ({
+    totalPayments,
+    activeFilter = 'all',
+  }: DashboardViewedProps) =>
+    track('Dashboard Viewed', {
+      journey: 'sender',
+      total_payments: totalPayments,
+      active_filter: activeFilter,
+    }),
+
+  /**
+   * §4.5 Dashboard Filter Applied — fires when the sender selects a different status filter on the dashboard.
+   */
+  dashboardFilterApplied: ({ filter }: DashboardFilterAppliedProps) =>
+    track('Dashboard Filter Applied', {
+      journey: 'sender',
+      filter,
     }),
 
   /**
