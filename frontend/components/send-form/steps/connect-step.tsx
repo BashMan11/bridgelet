@@ -24,6 +24,10 @@ export function ConnectStep({ publicKey, onConnected }: ConnectStepProps) {
     } catch (err) {
       setStatus('error');
       setError(err instanceof Error ? err.message : 'Failed to connect wallet.');
+      // §4.3 `Wallet Connection Failed`
+      analytics.walletConnectionFailed({
+        errorCode: err instanceof Error ? 'CONNECTION_DENIED' : 'unknown',
+      });
       // Sender's wallet refused connection (§6 `wallet_connection_failed`).
       analytics.errorDisplayed({
         journey: 'sender',

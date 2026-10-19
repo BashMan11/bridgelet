@@ -1,15 +1,21 @@
 /**
  * Mock `window.plausible` for local development and tests.
  *
- * `lib/analytics.ts` dispatches to `window.plausible` and does nothing at all
- * when it is absent, so without this there is no way to verify instrumentation
- * without either loading the real Plausible script (which needs a registered
- * domain and sends real traffic) or reading `console.debug` output and
- * comparing it against `docs/analytics-spec.md` by eye.
+ * `lib/analytics.ts` dispatches to `window.plausible` first. The real Plausible
+ * script only loads when `NEXT_PUBLIC_PLAUSIBLE_DOMAIN` is set
+ * (`components/plausible-script.tsx`), and it never loads in a test
+ * environment. So without a mock, `track()`'s success path cannot be exercised
+ * at all - events fall through to `console.debug` in development and are
+ * silently dropped in production.
  *
- * With this stub installed, every event lands in a recorded array and is
- * printed with its payload, so a developer can confirm both that an event
- * fires and that its payload matches the spec.
+ * Two entry points, over one shared recording buffer:
+ *
+ * - `initMocks()` (see `./index.ts`) installs it in development when the real
+ *   script is not configured, via `initAnalyticsMock()`.
+ * - Tests call `installMockPlausible()` and assert on the returned handle.
+ *
+ * The recorder keeps the exact `(eventName, { props })` shape that `track()`
+ * calls, so tests validate the real payload rather than a reduced one.
  *
  * ```ts
  * // in a dev-only bootstrap, alongside initMocks()
@@ -26,9 +32,96 @@ export interface RecordedEvent {
   props: Record<string, unknown>;
 }
 
+/** Alias kept for the handle-based API. */
+export type CapturedAnalyticsEvent = RecordedEvent;
+
+/**
+ * Handle returned by {@link installMockPlausible}.
+ *
+ * `events` is the shared recording buffer, so a test that installs the mock
+ * and a story that reads {@link getRecordedEvents} observe the same calls.
+ */
+export interface MockPlausible {
+  /** Captured events, in dispatch order. Mutated in place as events arrive. */
+  readonly events: RecordedEvent[];
+  /** Clears the captured events without uninstalling. */
+  reset(): void;
+  /** Removes `window.plausible` (if it is still this mock) and clears events. */
+  uninstall(): void;
+}
+
+type PlausibleFunction = (
+  eventName: string,
+  options?: { props?: Record<string, unknown> },
+) => void;
+
+/** Events recorded since the last reset. */
 const recorded: RecordedEvent[] = [];
 
-let installed = false;
+/** The function currently installed by this module, if any. */
+let installedMock: PlausibleFunction | null = null;
+
+/** Narrows the globally-installed `window.plausible` without augmenting `Window`. */
+function windowWithPlausible(): { plausible?: unknown } | null {
+  return typeof window === 'undefined' ? null : (window as unknown as { plausible?: unknown });
+}
+
+const plausibleMock: PlausibleFunction = (eventName, options) => {
+  // Clone the props so a later mutation at a call site cannot rewrite history.
+  const props = { ...(options?.props ?? {}) };
+  recorded.push({ name: eventName, props });
+  // Printed so a developer sees the payload without opening devtools.
+  if (process.env.NODE_ENV === 'development') {
+    console.info('[analytics:mock]', eventName, props);
+  }
+};
+
+/**
+ * Installs the recording stub and returns a handle to it.
+ *
+ * Safe to call more than once: every call reuses the single shared buffer, which
+ * is what a test's `beforeEach` wants. Returns a handle even during SSR (where no
+ * `window` exists) so a caller never has to branch.
+ */
+export function installMockPlausible(): MockPlausible {
+  const target = windowWithPlausible();
+  if (target) {
+    target.plausible = plausibleMock;
+    installedMock = plausibleMock;
+  }
+
+  return {
+    events: recorded,
+    reset() {
+      recorded.length = 0;
+    },
+    uninstall() {
+      recorded.length = 0;
+      const current = windowWithPlausible();
+      if (current && current.plausible === plausibleMock) {
+        delete current.plausible;
+      }
+      if (installedMock === plausibleMock) {
+        installedMock = null;
+      }
+    },
+  };
+}
+
+/**
+ * Installs the recording stub for the dev bootstrap.
+ *
+ * Idempotent, and never replaces a real Plausible implementation: if the actual
+ * script has already loaded this is a no-op, so adding it to a dev bootstrap can
+ * never shadow production behaviour.
+ */
+export function initAnalyticsMock(): void {
+  if (typeof window === 'undefined') return;
+  if (installedMock !== null) return;
+  if (typeof window.plausible === 'function') return;
+  window.plausible = plausibleMock;
+  installedMock = plausibleMock;
+}
 
 /** Events recorded since the last {@link resetPlausibleMock}. */
 export function getRecordedEvents(): RecordedEvent[] {
@@ -52,28 +145,5 @@ export function resetPlausibleMock(): void {
 
 /** Removes the stub and the buffer, restoring the pre-mock behaviour. */
 export function uninstallPlausibleMock(): void {
-  delete (window as unknown as { plausible?: unknown }).plausible;
-  recorded.length = 0;
-  installed = false;
-}
-
-/**
- * Installs the recording stub. Idempotent, and never replaces a real Plausible
- * implementation: if the actual script has loaded, this is a no-op, so adding
- * it to a dev bootstrap can never shadow production behaviour.
- */
-export function initAnalyticsMock(): void {
-  if (typeof window === 'undefined') return;
-  if (installed) return;
-  if (typeof window.plausible === 'function') return;
-
-  const plausible = (name: string, options?: { props?: Record<string, unknown> }): void => {
-    const props = options?.props ?? {};
-    recorded.push({ name, props });
-    // Printed so the developer sees the payload without opening devtools.
-    console.info('[analytics:mock]', name, props);
-  };
-
-  window.plausible = plausible;
-  installed = true;
+  installMockPlausible().uninstall();
 }

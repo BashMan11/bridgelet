@@ -30,6 +30,18 @@
 - [ ] Integration Tests: Verified interaction between modules.
 - [ ] Linting: Code follows the project's style guide.
 
+### Analytics (tick only if this PR adds, changes or removes a tracked event)
+- [ ] `docs/analytics-spec.md` was updated **in this PR**, before or alongside the code.
+- [ ] The event name matches a `#### `Event Name`` heading exactly (Title Case, `Noun Verb`) — the drift check in `.github/workflows/analytics-spec-diff.yml` fails otherwise.
+- [ ] The event is emitted through the single `track()` dispatch point, not called directly.
+- [ ] The payload matches the spec's property table, including the §3.1 base payload.
+- [ ] No wallet address, claim token, or message content is included in the payload.
+- [ ] A test asserts the event fires (unit payload and/or e2e).
+- [ ] `docs/analytics-kpi-definitions.md` updated if this event is, or unblocks, a KPI input.
+- [ ] If the spec changed: bumped the spec version and added a changelog row.
+
+> Guidance: `bridgelet-product-audit/runbooks/review-analytics-spec-before-new-event.md`
+
 ### Manual Verification
 **1. Environment:**
 * Target Environment: 

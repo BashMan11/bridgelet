@@ -84,6 +84,37 @@ The documentation lead is responsible for coordinating each review cycle, assign
 
 ---
 
+### N. `docs/analytics-spec.md`
+
+- **Document Owner**: Product Analytics Owner (with Frontend and Mobile
+  Engineering as reviewers — all three surfaces emit from this document)
+- **Recommended cadence**: **Quarterly, and on any PR that touches it.** The
+  bi-annual cadence below is wrong for this document: it is 900+ lines,
+  describes behaviour rather than describing a decision, and is being
+  implemented by several parallel branches at once.
+- **Last Reviewed Date**: _______________
+- **Review Items**:
+  - [ ] Every `#### \`Event Name\`` heading still has at least one emitter in `frontend/` or `mobile/` — a heading with no call site is unimplemented, and should be marked as such rather than left to look live
+  - [ ] Every emitted event still appears as a heading (the inverse check, enforced in CI by `.github/workflows/analytics-spec-diff.yml`)
+  - [ ] Event names still match exactly, including Title Case (`Noun Verb`)
+  - [ ] Every §3.2 conditional property listed is still populated somewhere in code
+  - [ ] §3.1 base payload fields are all populated for both web and mobile, and the platform-specific omissions are still accurate
+  - [ ] §6 `error_type` taxonomy still matches `ERROR_TYPES` / the mobile union — no value invented, none removed
+  - [ ] §7 funnel stages still correspond to events that fire
+  - [ ] §8 KPI formulas still match the queries in `docs/analytics-kpi-definitions.md`
+  - [ ] Spec version bumped, with a changelog row, for every behaviour change since the last review
+  - [ ] The "not a source of truth" status note is still accurate — if implementation compliance has been verified since, replace it with what *has* been verified rather than deleting it
+  - [ ] Mobile extension (§10) still matches `mobile/app/src/analytics/analytics.ts`
+- **Drift Risk**: Four concrete scenarios, all observed or anticipated in
+  `postmortems/analytics-spec-vs-implementation-unverified.md`: events added
+  in code without a spec update; events renamed in code; payload properties
+  changed; events removed from code but left in the spec. The first three are
+  caught by the CI drift check; **removal is not**, because a deleted emitter
+  leaves the spec looking correct. This entry exists so that is a scheduled
+  check rather than an accident.
+
+---
+
 ## Cross-Cutting Review Items (All Documents)
 - [ ] **MDX/PDF Pair Verification**: All paired `.mdx` and `.pdf` files have been checked for content drift (one randomly selected file during this cycle, per the [PDF artifact freshness spot check](../runbooks/pdf-artifact-freshness-spot-check.md))
 - [ ] **Internal Links**: All hyperlinks between documents in the `docs/` directory resolve correctly

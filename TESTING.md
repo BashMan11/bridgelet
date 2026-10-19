@@ -25,6 +25,65 @@ This document provides comprehensive testing guidelines for the Bridgelet projec
 14. [Troubleshooting Guide](#troubleshooting-guide)
 15. [Contributing Tests](#contributing-tests)
 
+## Analytics Testing
+
+Instrumentation is easy to delete and hard to notice missing: a refactor can
+drop a `track()` call and every other test still passes, because nothing else
+depends on it. Analytics therefore gets its own testing approach rather than
+being left to individual PRs to remember.
+
+### The layers
+
+| Layer | What it proves | Where |
+| --- | --- | --- |
+| Payload unit tests | A given event emits the documented §3.1/§3.2 fields | `frontend/lib/analytics.test.ts` |
+| Event-firing e2e | Key funnel events fire, and fire **in order**, during the real flow | `frontend/e2e/analytics.spec.ts` |
+| Base-payload integrity | Every event carries the §3.1 fields, degraded safely under SSR | `frontend/lib/analytics.test.ts` |
+| Opt-out behaviour | A DNT or opted-out visitor emits nothing and has no identifier minted | `frontend/lib/analytics.test.ts`, `frontend/e2e/analytics.spec.ts` |
+| Privacy assertions | No address, token or free-text input reaches a payload | `frontend/e2e/analytics.spec.ts` |
+| Spec drift | Event names in code match the spec, in CI | `.github/workflows/analytics-spec-diff.yml` |
+| Visual states | The instrumented surfaces render correctly | `frontend/components/claim-status-card.stories.tsx` |
+
+### Verifying locally without a provider
+
+`frontend/mocks/plausible.ts` installs a recording `window.plausible` that
+captures every event and prints its payload. Use it rather than loading the
+real provider: the real script needs a registered domain and sends real
+traffic. It never replaces a real implementation, so it is safe in a dev
+bootstrap.
+
+```ts
+const { initAnalyticsMock, getRecordedEventNames } = await import('@/mocks');
+initAnalyticsMock();
+// ... interact with the app ...
+getRecordedEventNames(); // ['Page Viewed', 'Claim Page Opened', ...]
+```
+
+Set `NEXT_PUBLIC_ANALYTICS_VERIFY=true` to additionally validate every payload
+against the §3.1 shape at the point it is sent, so a missing field is reported
+in the browser instead of surfacing as a wrong number in a dashboard months
+later.
+
+### What is deliberately not tested here
+
+Volume, throughput and provider failure behaviour. Those need real traffic and
+a staging ingest endpoint, and must never be exercised with production keys —
+see `docs/analytics-load-testing.md` for the plan and the budgets to agree
+before launch.
+
+### Manual checklist for an analytics change
+
+1. Load the affected flow with `initAnalyticsMock()` active.
+2. Confirm the expected event fired, **at the documented trigger point** — not
+   merely that it fired eventually.
+3. Confirm the payload against the spec table for that event.
+4. Confirm the base payload is present on every one.
+5. Confirm nothing sensitive is in the payload.
+6. Confirm the event does not fire twice (React StrictMode double-mounts and
+   refreshes are the usual culprits).
+
+---
+
 ## Testing Philosophy
 
 The Bridgelet testing strategy is built on multiple layers of validation to ensure reliability, security, and correctness of the ephemeral account system. Our approach emphasizes:
@@ -45,6 +104,7 @@ The table below maps each part of the codebase to the testing tools and the curr
 | Frontend API layer | MSW v2 | Network mock in dev and tests | ✅ Mock handlers implemented |
 | Frontend E2E flows | Playwright | Full browser user journeys | ✅ Configured (smoke suite) |
 | Frontend visual regression | Storybook + Chromatic | Component story snapshots | 🔲 Planned |
+| Frontend analytics events | Vitest + Playwright | Event name/payload and firing assertions | ⚠️ Unit tests present; E2E pending |
 | Frontend performance | Lighthouse CI | Core Web Vitals, accessibility score | 🔲 Planned |
 | Mobile unit tests | Jest + jest-expo | Component and utility logic | ⚠️ Runner configured, no test files yet |
 | SDK unit tests | Jest | Core account / payment logic | 🔲 Planned |
@@ -352,6 +412,68 @@ Add to CI:
 ```
 
 Chromatic compares component snapshots on each PR. Reviewers approve or reject visual diffs in the Chromatic dashboard before merging.
+
+---
+
+### Analytics Event Verification
+
+Analytics instrumentation (`frontend/lib/analytics.ts`, spec in `docs/analytics-spec.md`) is a real surface and is tested like one: payload assertions in unit tests, event-firing assertions in E2E flows, and a Storybook story for the visual/manual side. This section is the documented home for that strategy so instrumentation is not verified ad hoc.
+
+#### Unit-level payload assertions
+
+`track()` dispatches to `window.plausible`, so a unit test installs a `vi.fn()` as `window.plausible` and asserts on the recorded calls. Every event helper on `analytics` should have at least:
+
+- an assertion that the event name is the exact `Noun Verb` string from the spec, and
+- an assertion that the payload contains the spec-required properties for the journey, and omits optional properties that were not supplied.
+
+Cross-cutting rules get their own tests:
+
+- **Do Not Track (§9.5):** with `DNT: 1`, nothing is emitted *and* no `anonymous_id` / `session_id` is minted.
+- **Deduplication (§9.4):** `Payment Created` and `Claim Succeeded` are idempotent on `claim_id`, while other events are not.
+- **Error taxonomy (§6):** one case per `error_type` an emitter can produce, asserting the `error_type` value exactly.
+
+```ts
+// lib/analytics.test.ts
+(window as unknown as { plausible: ReturnType<typeof vi.fn> }).plausible = vi.fn();
+analytics.errorDisplayed({
+  journey: 'recipient',
+  claimId: 'tok_1',
+  errorType: 'expired_token',
+  sourceScreen: 'claim_landing',
+});
+const [name, { props }] = (window as any).plausible.mock.calls[0];
+expect(name).toBe('Error Displayed');
+expect(props).toEqual(expect.objectContaining({ error_type: 'expired_token' }));
+```
+
+#### E2E event-firing assertions
+
+Unit tests prove the payload shape, not that the right call site fires on the right user action. Playwright covers the firing: each critical flow asserts the events it must produce. Stub `window.plausible` with an `addInitScript` recorder before the app loads, then read the recorded events after the interaction — do **not** depend on the real Plausible script loading.
+
+At minimum, assert the two funnels from §7:
+
+- **Sender (§7.1):** `Send Form Viewed` → `Send Form Completed` → `Payment Confirmed` → `Payment Created` → `Claim Link Copied`.
+- **Recipient (§7.2):** `Claim Page Opened` → `Claim Verified` → `Claim CTA Clicked` → `Claim Submitted` → `Claim Succeeded`.
+- **Error flows (§6):** the expected `Error Displayed` `error_type` fires for each seeded failure (expired token, already claimed, invalid token, network unavailable).
+
+```ts
+await page.addInitScript(() => {
+  (window as any).__events = [];
+  (window as any).plausible = (name: string, opts: { props: unknown }) =>
+    (window as any).__events.push({ name, props: opts.props });
+});
+await page.goto('/claim/expired-token');
+const events = await page.evaluate(() => (window as any).__events);
+expect(events.map((e: { name: string }) => e.name)).toContain('Error Displayed');
+```
+
+#### Storybook
+
+A story that installs the mock Plausible shows an instrumented component state — for example the `Error Displayed` banners across all eight `error_type` values — together with the payload the component actually fires, so a reviewer can confirm the UI and the tracking call without running a full flow. Analytics stories live under `frontend/stories/`.
+
+#### What not to assert
+
+`anonymous_id`, `session_id`, `app_version`, `user_agent`, and `device_type` are environment-dependent. Assert that they are present and well-shaped (for example `device_type` matches `mobile|tablet|desktop`), never that they equal a fixed value.
 
 ---
 

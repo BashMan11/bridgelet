@@ -215,6 +215,10 @@ export function ConfirmStep({ state, onBack }: ConfirmStepProps) {
     } catch (err) {
       const info = classifyError(err);
       setErrorInfo(info);
+      analytics.paymentCreationFailed({
+        errorCode: info.code,
+        assetType: state.assetCode,
+      });
       if (err instanceof RateLimitError) {
         setRetryAfter(err.retryAfter);
       } else {
