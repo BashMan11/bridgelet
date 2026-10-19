@@ -66,6 +66,12 @@ If integrator usage analytics later become a product goal, extend this spec rath
 - Define the events as server-side only, named under the section 2.1 rules, with a server-side base payload that drops the browser fields.
 - Keep secrets out of payloads. A webhook's signing `secret` must never be recorded, and the target `url` should be left out or reduced to its host.
 
+### Out of Scope: Mobile Push Notifications & Badge Interactions
+
+The mobile application prototype includes mock notifications and tab badge rendering (`mobile/app/src/hooks/useNotificationBadge.ts`, `mobile/app/src/store/notificationStore.ts`, `mobile/app/(tabs)/notifications.tsx`). In the current v1.0.0 specification:
+- Mobile push notifications, in-app notification badge counts, and notification list interactions are not instrumented and are excluded from the baseline Sender and Recipient funnels.
+- If push notifications and alert feeds are developed to re-engage senders (e.g., payment claimed or expired alerts) or recipients (claim reminders), a dedicated event category (`Notification Received`, `Notification Opened`, `Notification Cleared`) should be introduced in a future specification revision along with attribution parameters (`notification_id`, `notification_type`, `action_taken`) and funnel attribution hooks (§7).
+
 ### Mobile Feature Note: QR Code Scanning & Recipient Entry Channel
 
 The mobile client architecture tracks recipient claims and deep linking. While `ShareSheet.tsx` supports rendering a QR code on sender devices for offline/in-person transfer, dedicated in-app camera QR scanning (`QRCodeScanner.tsx`) represents a distinct physical onboarding path:
