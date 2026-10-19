@@ -18,10 +18,14 @@ import {
   detectNetwork,
   ERROR_TYPES,
   ErrorType,
+  expiryDaysFromHours,
   getAnonymousId,
   getSessionId,
   isAnalyticsOptedOut,
   isDoNotTrackEnabled,
+  senderErrorType,
+  SEND_FORM_FIELDS,
+
   isVerificationEnabled,
   JOURNEYS,
   normalizeJourney,
@@ -38,6 +42,8 @@ import {
   isReturningClaimVisitor,
   type SendFormFieldName,
   VALID_EXPIRY_WINDOWS,
+  WALLET_PROVIDERS,
+
   validatePayload,
   type ValidationError,
 } from '@/lib/analytics';
@@ -151,6 +157,7 @@ describe('conditional payload property helpers (Â§3.2)', () => {
 
   it('builds the expiry_days property for each valid window', () => {
     expect(conditional.expiryDays(1)).toEqual({ expiry_days: 1 });
+    expect(conditional.expiryDays(3)).toEqual({ expiry_days: 3 });
     expect(conditional.expiryDays(7)).toEqual({ expiry_days: 7 });
     expect(conditional.expiryDays(30)).toEqual({ expiry_days: 30 });
     expect(conditional.expiryDays(90)).toEqual({ expiry_days: 90 });
@@ -160,8 +167,8 @@ describe('conditional payload property helpers (Â§3.2)', () => {
     expect(conditional.expiryDays(null)).toEqual({ expiry_days: null });
   });
 
-  it('exposes the enumerated expiry windows from the spec', () => {
-    expect(VALID_EXPIRY_WINDOWS).toEqual([1, 7, 30, 90]);
+  it('exposes the enumerated expiry windows, including the 3-day send-form option', () => {
+    expect(VALID_EXPIRY_WINDOWS).toEqual([1, 3, 7, 30, 90]);
   });
 
   it('builds the error_type property', () => {
@@ -1916,6 +1923,283 @@ describe('dispatch targets and PostHog fallback', () => {
     expect(capture).not.toHaveBeenCalled();
   });
 })
+// ─── #818 expiry_days from the send form's hour-based choice ──────────────────
+
+describe('expiryDaysFromHours', () => {
+  it('converts each window the expiry step offers', () => {
+    expect(expiryDaysFromHours(24)).toBe(1);
+    expect(expiryDaysFromHours(72)).toBe(3);
+    expect(expiryDaysFromHours(168)).toBe(7);
+  });
+
+  it('rounds a partial day to the nearest whole day', () => {
+    expect(expiryDaysFromHours(36)).toBe(2);
+    expect(expiryDaysFromHours(12)).toBe(1);
+  });
+
+  it('snaps an off-list window to the nearest value the spec admits', () => {
+    // The send form only offers 24/72/168h, but a restored or migrated form
+    // state could carry anything; the emitted value must stay in-vocabulary.
+    expect(VALID_EXPIRY_WINDOWS).toContain(expiryDaysFromHours(100));
+    expect(VALID_EXPIRY_WINDOWS).toContain(expiryDaysFromHours(400));
+  });
+
+  it('treats a zero or negative window as "never expires"', () => {
+    expect(expiryDaysFromHours(0)).toBeNull();
+    expect(expiryDaysFromHours(-24)).toBeNull();
+  });
+
+  it('treats an absent window as null rather than a guess', () => {
+    expect(expiryDaysFromHours(undefined)).toBeNull();
+    expect(expiryDaysFromHours(null)).toBeNull();
+  });
+
+  it('never emits a zero-day window', () => {
+    expect(expiryDaysFromHours(1)).toBe(1);
+  });
+});
+
+// ─── #909 wallet_provider ────────────────────────────────────────────────────
+
+describe('WALLET_PROVIDERS', () => {
+  it('is a closed set dashboards can group by without normalising', () => {
+    expect(Object.values(WALLET_PROVIDERS)).toEqual([
+      'freighter',
+      'lobstr',
+      'generated',
+      'unknown',
+    ]);
+  });
+
+  it('is emitted on Wallet Connection Failed', () => {
+    const plausible = plausibleMock();
+    (window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible = plausible;
+
+    analytics.walletConnectionFailed({
+      walletProvider: WALLET_PROVIDERS.freighter,
+      errorCode: 'FREIGHTER_NOT_INSTALLED',
+    });
+
+    expect(plausible).toHaveBeenCalledTimes(1);
+    expect(plausible.mock.calls[0]![0]).toBe('Wallet Connection Failed');
+    expect(plausible.mock.calls[0]![1]).toEqual(
+      expect.objectContaining({
+        props: expect.objectContaining({
+          journey: 'sender',
+          wallet_provider: 'freighter',
+          error_code: 'FREIGHTER_NOT_INSTALLED',
+        }),
+      }),
+    );
+  });
+
+  it('defaults to "unknown" provider and error code when the caller knows neither', () => {
+    const plausible = plausibleMock();
+    (window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible = plausible;
+
+    analytics.walletConnectionFailed({});
+
+    expect(plausible.mock.calls[0]![1]).toEqual(
+      expect.objectContaining({
+        props: expect.objectContaining({ wallet_provider: 'unknown', error_code: 'unknown' }),
+      }),
+    );
+  });
+
+  it('is emitted alongside the legacy wallet_type on Payment Confirmed', () => {
+    const plausible = plausibleMock();
+    (window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible = plausible;
+
+    analytics.paymentConfirmed({
+      walletType: 'Freighter',
+      walletProvider: WALLET_PROVIDERS.freighter,
+    });
+
+    expect(plausible.mock.calls[0]![1]).toEqual(
+      expect.objectContaining({
+        props: expect.objectContaining({ wallet_type: 'Freighter', wallet_provider: 'freighter' }),
+      }),
+    );
+  });
+});
+
+// ─── #773 Send Form Started ──────────────────────────────────────────────────
+
+describe('sendFormStarted', () => {
+  afterEach(() => {
+    delete (window as unknown as { plausible?: unknown }).plausible;
+  });
+
+  it('records the first field the sender touched', () => {
+    const plausible = plausibleMock();
+    (window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible = plausible;
+
+    analytics.sendFormStarted({ firstField: SEND_FORM_FIELDS.amount });
+
+    expect(plausible.mock.calls[0]![0]).toBe('Send Form Started');
+    expect(plausible.mock.calls[0]![1]).toEqual(
+      expect.objectContaining({
+        props: expect.objectContaining({ journey: 'sender', first_field: 'amount' }),
+      }),
+    );
+  });
+
+  it('exposes the spec vocabulary for first_field', () => {
+    expect(Object.values(SEND_FORM_FIELDS)).toEqual([
+      'amount',
+      'asset',
+      'recipient_name',
+      'message',
+      'expiration',
+    ]);
+  });
+});
+
+// ─── #782 Payment Success Viewed ─────────────────────────────────────────────
+
+describe('paymentSuccessViewed', () => {
+  afterEach(() => {
+    delete (window as unknown as { plausible?: unknown }).plausible;
+  });
+
+  it('carries the claim id, asset and USD equivalent', () => {
+    const plausible = plausibleMock();
+    (window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible = plausible;
+
+    analytics.paymentSuccessViewed({ claimId: 'claim_1', assetType: 'XLM', amountUsdEquiv: 12.5 });
+
+    expect(plausible.mock.calls[0]![0]).toBe('Payment Success Viewed');
+    expect(plausible.mock.calls[0]![1]).toEqual(
+      expect.objectContaining({
+        props: expect.objectContaining({
+          journey: 'sender',
+          claim_id: 'claim_1',
+          asset_type: 'XLM',
+          amount_usd_equiv: 12.5,
+        }),
+      }),
+    );
+  });
+
+  it('omits amount_usd_equiv rather than reporting zero when the rate is unknown', () => {
+    const plausible = plausibleMock();
+    (window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible = plausible;
+
+    analytics.paymentSuccessViewed({ claimId: 'claim_1', assetType: 'XLM' });
+
+    const props = (plausible.mock.calls[0]![1] as { props: Record<string, unknown> }).props;
+    expect('amount_usd_equiv' in props).toBe(false);
+  });
+});
+
+// ─── #816 / #817 conditional properties on sender events ─────────────────────
+
+describe('sender events carry their conditional properties', () => {
+  afterEach(() => {
+    delete (window as unknown as { plausible?: unknown }).plausible;
+  });
+
+  function propsOf(call: any[]): Record<string, unknown> {
+    return call[1].props;
+  }
+
+  it('sends asset_type, expiry_days and amount_usd_equiv on Payment Created', () => {
+    const plausible = plausibleMock();
+    (window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible = plausible;
+
+    analytics.paymentCreated({
+      claimId: 'claim_1',
+      assetType: 'USDC',
+      expiryDays: expiryDaysFromHours(72),
+      amountUsdEquiv: 49.99,
+      confirmationTimeMs: 1234,
+    });
+
+    expect(propsOf(plausible.mock.calls[0]!)).toEqual(
+      expect.objectContaining({
+        asset_type: 'USDC',
+        expiry_days: 3,
+        amount_usd_equiv: 49.99,
+        confirmation_time_ms: 1234,
+      }),
+    );
+  });
+
+  it('sends amount_usd_equiv on Send Form Completed and Payment Confirmation Viewed', () => {
+    const plausible = plausibleMock();
+    (window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible = plausible;
+
+    analytics.sendFormCompleted({
+      assetType: 'XLM',
+      expiryDays: 1,
+      amountUsdEquiv: 3.2,
+      hasRecipientName: true,
+      hasMessage: false,
+    });
+    analytics.paymentConfirmationViewed({ assetType: 'XLM', expiryDays: 1, amountUsdEquiv: 3.2 });
+
+    expect(propsOf(plausible.mock.calls[0]!)).toEqual(
+      expect.objectContaining({ amount_usd_equiv: 3.2 }),
+    );
+    expect(propsOf(plausible.mock.calls[1]!)).toEqual(
+      expect.objectContaining({ amount_usd_equiv: 3.2 }),
+    );
+  });
+});
+
+// ─── #825-#828 sender error taxonomy ─────────────────────────────────────────
+
+describe('senderErrorType', () => {
+  it('maps account-creation network failures to network_unavailable', () => {
+    expect(senderErrorType('NETWORK_FAILURE')).toBe('network_unavailable');
+    expect(senderErrorType('SERVER_ERROR')).toBe('network_unavailable');
+    expect(senderErrorType('RATE_LIMITED')).toBe('network_unavailable');
+  });
+
+  it('maps rejected Stellar submissions to transaction_failed', () => {
+    expect(senderErrorType('STELLAR_CREATION_FAILURE')).toBe('transaction_failed');
+    expect(senderErrorType('INSUFFICIENT_FUNDS')).toBe('transaction_failed');
+    expect(senderErrorType('INSUFFICIENT_BALANCE')).toBe('transaction_failed');
+    expect(senderErrorType('MISSING_TRUSTLINE')).toBe('transaction_failed');
+    expect(senderErrorType('SUBMIT_FAILED')).toBe('transaction_failed');
+  });
+
+  it('maps a wallet that refused to wallet_connection_failed', () => {
+    expect(senderErrorType('USER_REJECTED')).toBe('wallet_connection_failed');
+    expect(senderErrorType('SIGNER_MISMATCH')).toBe('wallet_connection_failed');
+    expect(senderErrorType('UNAUTHORIZED')).toBe('wallet_connection_failed');
+  });
+
+  it('falls back to unknown for codes outside the taxonomy', () => {
+    expect(senderErrorType('SOMETHING_NEW')).toBe('unknown');
+    expect(senderErrorType(undefined)).toBe('unknown');
+    expect(senderErrorType('')).toBe('unknown');
+  });
+
+  it('only ever produces §6 taxonomy values', () => {
+    const codes = [
+      'NETWORK_FAILURE',
+      'SERVER_ERROR',
+      'RATE_LIMITED',
+      'STELLAR_CREATION_FAILURE',
+      'INSUFFICIENT_FUNDS',
+      'UNAUTHORIZED',
+      'INVALID_REQUEST',
+      'UNKNOWN_ERROR',
+      'UNSUPPORTED_ASSET',
+      'MISSING_TRUSTLINE',
+      'INSUFFICIENT_BALANCE',
+      'SUBMIT_FAILED',
+      'USER_REJECTED',
+      'SIGNER_MISMATCH',
+      'SIGNING_FAILED',
+    ];
+    for (const code of codes) {
+      expect(Object.values(ERROR_TYPES)).toContain(senderErrorType(code));
+    }
+  });
+});
+
 // ─── #886 platform constant ───────────────────────────────────────────────────
 
 

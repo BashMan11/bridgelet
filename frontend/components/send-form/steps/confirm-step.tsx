@@ -22,7 +22,14 @@ import {
 } from '@/lib/account-errors';
 import { publicEnv } from '@/lib/env';
 import { FundingError, fundEphemeralAccount } from '@/lib/fund-ephemeral-account';
-import { analytics, toAmountUsdEquiv } from '@/lib/analytics';
+import {
+  analytics,
+  ERROR_TYPES,
+  expiryDaysFromHours,
+  senderErrorType,
+  toAmountUsdEquiv,
+  WALLET_PROVIDERS,
+} from '@/lib/analytics';
 import { getXlmUsdRate } from '@/lib/xlm-price';
 
 /**
@@ -86,8 +93,28 @@ function classifyError(err: unknown): AccountCreationErrorInfo {
 
 type ConfirmStepProps = {
   state: SendFormState;
+  /** Live XLM/USD rate, fetched once by the parent form. `null` while loading. */
+  usdRate: number | null;
   onBack: () => void;
 };
+
+/**
+ * Picks the most specific machine-readable code available for a failed
+ * confirm-and-send.
+ *
+ * `classifyError()` collapses three error vocabularies into one
+ * `AccountCreationErrorCode`, which is right for choosing copy and the wrong
+ * thing to report: a rejected Freighter signature and a rejected funding
+ * payment both arrive as `INVALID_REQUEST`, yet only one of them is a wallet
+ * problem. When the original error carries its own code, that code is used
+ * for analytics and the classified code remains the user-facing one.
+ */
+function mostSpecificErrorCode(err: unknown, info: AccountCreationErrorInfo): string {
+  if (err instanceof FreighterSenderSigningError) return err.code;
+  if (err instanceof FundingError) return err.code;
+  if (err instanceof RateLimitError) return 'RATE_LIMITED';
+  return info.code;
+}
 
 type SubmitPhase =
   | 'idle'
@@ -102,7 +129,7 @@ type EmailStatus = 'idle' | 'sending' | 'sent' | 'failed' | 'not-configured';
 const STATUS_POLL_INTERVAL_MS = 3_000;
 const STATUS_POLL_MAX_MS = 120_000;
 
-export function ConfirmStep({ state, onBack }: ConfirmStepProps) {
+export function ConfirmStep({ state, usdRate, onBack }: ConfirmStepProps) {
   const [submitPhase, setSubmitPhase] = useState<SubmitPhase>('idle');
   const [signingModeUsed, setSigningModeUsed] = useState<'freighter-client' | 'backend' | null>(
     null,
@@ -134,7 +161,7 @@ export function ConfirmStep({ state, onBack }: ConfirmStepProps) {
 
   const submitting = submitPhase !== 'idle' && submitPhase !== 'success';
 
-  /** §3.2 `amount_usd_equiv` for the amount being sent, when known. */
+  /** 3.2 `amount_usd_equiv` for the amount being sent, when known. */
   function usdEquiv() {
     return toAmountUsdEquiv(state.amountXlm, state.assetCode, xlmUsdRateRef.current);
   }
@@ -153,9 +180,22 @@ export function ConfirmStep({ state, onBack }: ConfirmStepProps) {
     analytics.paymentConfirmationViewed({
       assetType: state.assetCode,
       amountUsdEquiv: toAmountUsdEquiv(state.amountXlm, state.assetCode, xlmUsdRateRef.current),
-      expiryDays: state.expiresInHours / 24,
+      expiryDays: expiryDaysFromHours(state.expiresInHours),
     });
   }, [state.assetCode, state.amountXlm, state.expiresInHours]);
+
+  // 4.4 `Payment Success Viewed` - the success screen is rendered by the
+  // early return below, so it is observed here rather than at the render
+  // site. Gated on the account id so a re-render of the same success screen
+  // cannot fire it twice.
+  useEffect(() => {
+    if (submitPhase !== 'success' || !createdAccountId) return;
+    analytics.paymentSuccessViewed({
+      claimId: createdAccountId,
+      assetType: state.assetCode,
+      amountUsdEquiv: usdEquiv(),
+    });
+  }, [submitPhase, createdAccountId, state.assetCode]);
 
   function buildCreateAccountPayload() {
     return {
@@ -230,7 +270,7 @@ export function ConfirmStep({ state, onBack }: ConfirmStepProps) {
         claimId: account.accountId,
         assetType: state.assetCode,
         amountUsdEquiv: usdEquiv(),
-        expiryDays: state.expiresInHours / 24,
+        expiryDays: expiryDaysFromHours(state.expiresInHours),
         confirmationTimeMs: confirmedAt.current != null ? Date.now() - confirmedAt.current : 0,
       });
       analytics.paymentDetailsViewed({ claimId: account.accountId, claimStatus: 'unclaimed' });
@@ -249,6 +289,22 @@ export function ConfirmStep({ state, onBack }: ConfirmStepProps) {
       setRetryCount(attempt);
       setSubmitPhase('idle');
       submitGuardRef.current = false;
+
+      // §6 `Error Displayed` — this panel is the send flow's largest error
+      // surface and previously emitted nothing at all, which left the
+      // sender-side half of the failure-rate KPIs unmeasurable. The code is
+      // taken from the original throw where it is more specific than the
+      // classified code (a funding `USER_REJECTED` and a creation
+      // `INVALID_REQUEST` collapse to the same classification but mean very
+      // different things to the sender), then mapped to §6's taxonomy.
+      const errorCode = mostSpecificErrorCode(err, info);
+      analytics.errorDisplayed({
+        journey: 'sender',
+        claimId: createdAccountId,
+        errorType: senderErrorType(errorCode),
+        errorCode,
+        sourceScreen: 'send_form_confirm',
+      });
     }
   }
 
@@ -309,8 +365,9 @@ export function ConfirmStep({ state, onBack }: ConfirmStepProps) {
     analytics.paymentConfirmed({
       assetType: state.assetCode,
       amountUsdEquiv: usdEquiv(),
-      expiryDays: state.expiresInHours / 24,
+      expiryDays: expiryDaysFromHours(state.expiresInHours),
       walletType: 'Freighter',
+      walletProvider: WALLET_PROVIDERS.freighter,
     });
     executeCreateAccount(1);
   }

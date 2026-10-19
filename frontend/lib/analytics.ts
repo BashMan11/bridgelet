@@ -875,10 +875,111 @@ export type PaymentClaimStatus = 'unclaimed' | 'claimed' | 'expired';
  * spread the fields they need without re-typing the snake_case names.
  */
 
-/** Allowed `expiry_days` windows: `1`, `7`, `30`, `90`, or `null` (never). */
-export const VALID_EXPIRY_WINDOWS = [1, 7, 30, 90] as const;
+/**
+ * Allowed `expiry_days` windows: `1`, `3`, `7`, `30`, `90`, or `null`
+ * (never).
+ *
+ * `3` is not in the original spec list, but it is a real product option:
+ * `expiry-step.tsx` offers 24h / 72h / 168h, so a sender choosing the middle
+ * option produced `expiry_days: 3` — a value the old list declared invalid.
+ * Rather than round a real choice into a different one, the vocabulary now
+ * admits it. See `expiryDaysFromHours` below, which is the only sanctioned
+ * way to produce this field.
+ */
+export const VALID_EXPIRY_WINDOWS = [1, 3, 7, 30, 90] as const;
 
 export type ExpiryDays = (typeof VALID_EXPIRY_WINDOWS)[number] | null;
+
+const HOURS_PER_DAY = 24;
+
+/**
+ * Converts the send form's expiry choice (in hours) into the §3.2
+ * `expiry_days` value.
+ *
+ * Previously each call site did `expiresInHours / 24` itself, which could
+ * produce a fractional or off-list value and let different call sites round
+ * the same choice differently. This rounds once, snaps to a value the spec
+ * admits, and returns `null` for "never" (a zero or negative window) — the
+ * spec documents `null` as its own value rather than an omission.
+ */
+export function expiryDaysFromHours(expiresInHours: number | null | undefined): ExpiryDays {
+  if (expiresInHours == null) return null;
+  if (expiresInHours <= 0) return null; // "never expires"
+  const days = Math.max(1, Math.round(expiresInHours / HOURS_PER_DAY));
+  return VALID_EXPIRY_WINDOWS.reduce((best, window) =>
+    Math.abs(window - days) < Math.abs(best - days) ? window : best,
+  );
+}
+
+/**
+ * §4.3 `wallet_provider` vocabulary.
+ *
+ * A closed set, so a dashboard can group by provider without a normalisation
+ * pass. `generated` covers a wallet Bridgelet provisions on the user's behalf
+ * rather than one they connected; `unknown` is the honest value when the
+ * failure happened before the provider could be identified.
+ */
+export const WALLET_PROVIDERS = {
+  freighter: 'freighter',
+  lobstr: 'lobstr',
+  generated: 'generated',
+  unknown: 'unknown',
+} as const;
+
+export type WalletProvider = (typeof WALLET_PROVIDERS)[keyof typeof WALLET_PROVIDERS];
+
+/**
+ * Maps the sender flow's error codes onto the §6 `error_type` taxonomy.
+ *
+ * The send flow classifies failures into three overlapping code vocabularies
+ * — `AccountCreationErrorCode` (`lib/account-errors.ts`), `FundingError.code`
+ * (`lib/fund-ephemeral-account.ts`) and `FreighterSenderSigningError.code`
+ * (`lib/freighter-sender-signing.ts`) — and before this mapping existed none
+ * of them reached a dashboard. The sender's largest error surface, a failed
+ * confirm-and-send, emitted no `Error Displayed` at all, leaving §8.2's
+ * failure-rate KPIs unmeasurable on the sender side.
+ *
+ * Keyed by raw code string rather than by importing those enums, so this
+ * module keeps no dependency on the SDK client. Anything unrecognised falls
+ * back to `unknown`, which is what §6 defines that value as.
+ */
+export const SENDER_ERROR_TYPE_BY_CODE: Readonly<Record<string, ErrorType>> = {
+  // AccountCreationErrorCode
+  NETWORK_FAILURE: ERROR_TYPES.network_unavailable,
+  SERVER_ERROR: ERROR_TYPES.network_unavailable,
+  RATE_LIMITED: ERROR_TYPES.network_unavailable,
+  STELLAR_CREATION_FAILURE: ERROR_TYPES.transaction_failed,
+  INSUFFICIENT_FUNDS: ERROR_TYPES.transaction_failed,
+  UNAUTHORIZED: ERROR_TYPES.wallet_connection_failed,
+  INVALID_REQUEST: ERROR_TYPES.unknown,
+  UNKNOWN_ERROR: ERROR_TYPES.unknown,
+  // FundingError.code
+  UNSUPPORTED_ASSET: ERROR_TYPES.transaction_failed,
+  MISSING_TRUSTLINE: ERROR_TYPES.transaction_failed,
+  INSUFFICIENT_BALANCE: ERROR_TYPES.transaction_failed,
+  SUBMIT_FAILED: ERROR_TYPES.transaction_failed,
+  // FreighterSenderSigningError.code
+  USER_REJECTED: ERROR_TYPES.wallet_connection_failed,
+  SIGNER_MISMATCH: ERROR_TYPES.wallet_connection_failed,
+  SIGNING_FAILED: ERROR_TYPES.unknown,
+};
+
+/** Resolves a sender-flow error code to its §6 `error_type`. */
+export function senderErrorType(code: string | undefined): ErrorType {
+  if (!code) return ERROR_TYPES.unknown;
+  return SENDER_ERROR_TYPE_BY_CODE[code] ?? ERROR_TYPES.unknown;
+}
+
+/** §4.2 `first_field` values for `Send Form Started` / `Send Form Field Changed`. */
+export const SEND_FORM_FIELDS = {
+  amount: 'amount',
+  asset: 'asset',
+  recipient_name: 'recipient_name',
+  message: 'message',
+  expiration: 'expiration',
+} as const;
+
+export type SendFormField = (typeof SEND_FORM_FIELDS)[keyof typeof SEND_FORM_FIELDS];
 
 /**
  * Normalises an asset identifier to the §3.2 `asset_type` form (`"XLM"`,
@@ -940,7 +1041,6 @@ function assetProps(assetType?: string | null, usdEquiv?: number | null): EventP
       : {}),
   };
 }
-
 export const conditional = {
   // Return types are inferred rather than annotated as EventProps. Spreading an
   // index-signature type into an object literal erases the known keys from the
@@ -1175,8 +1275,7 @@ export function daysRemainingUntil(iso: string): number | undefined {
  * Shapes for events with no emitter yet are taken from their §4–§6 tables;
  * the first real emitter may tighten them.
  */
-type SendFormField = 'amount' | 'asset' | 'recipient_name' | 'message' | 'expiration';
-type WalletProviderPath = 'freighter' | 'lobstr' | 'generated';
+type WalletProviderPath = 'freighter' | 'lobstr' | 'generated' | 'unknown';
 type DashboardFilter = 'all' | 'unclaimed' | 'claimed' | 'expired';
 
 type EventPayloadShapes = {
@@ -1188,7 +1287,7 @@ type EventPayloadShapes = {
   'Payment Confirmation Viewed': { journey?: Journey; asset_type?: string; expiry_days?: number | null };
   'Wallet Connected': { journey?: Journey; wallet_type?: string; wallet_provider: WalletProviderPath };
   'Wallet Connection Failed': { journey?: Journey; wallet_type?: string; wallet_provider?: WalletProviderPath; error_code?: string };
-  'Payment Confirmed': { journey?: Journey; asset_type?: string; expiry_days?: number | null; wallet_type?: string };
+  'Payment Confirmed': { journey?: Journey; asset_type?: string; expiry_days?: number | null; wallet_type?: string; wallet_provider?: WalletProviderPath };
   'Payment Created': { journey?: Journey; claim_id: string; asset_type?: string; expiry_days?: number | null; confirmation_time_ms: number };
   'Payment Creation Failed': { journey?: Journey; asset_type?: string; error_code?: string };
   'Payment Success Viewed': { journey?: Journey; claim_id: string; asset_type?: string };
@@ -1306,6 +1405,16 @@ export const analytics = {
       has_recipient_name: hasRecipientName,
       has_message: hasMessage,
     }),
+  /**
+   * §4.2 `Send Form Started` — fires once per form view, on the sender's
+   * first interaction with any field. `firstField` names that field so a
+   * funnel that never completes can be attributed to where it stalled.
+   */
+  sendFormStarted: ({ firstField }: { firstField: SendFormField }) =>
+    track('Send Form Started', {
+      journey: 'sender',
+      first_field: firstField,
+    }),
   paymentConfirmationViewed: ({
     assetType,
     amountUsdEquiv,
@@ -1320,31 +1429,65 @@ export const analytics = {
       ...assetProps(assetType, amountUsdEquiv),
       ...(expiryDays !== undefined ? conditional.expiryDays(expiryDays) : {}),
     }),
-  /**
-   * §4.3 Wallet Connection Failed - fires when wallet connection is attempted but fails.
-   */
-  walletConnectionFailed: ({ errorCode = 'unknown' }: { errorCode?: string } = {}) =>
-    track('Wallet Connection Failed', {
-      journey: 'sender',
-      ...conditional.errorCode(errorCode),
-    }),
   paymentConfirmed: ({
     assetType,
     amountUsdEquiv,
     expiryDays,
     walletType,
+    walletProvider = WALLET_PROVIDERS.unknown,
   }: {
     assetType?: string;
     amountUsdEquiv?: number;
     expiryDays?: number | null;
     walletType?: string;
+    walletProvider?: WalletProvider;
   }) =>
     track('Payment Confirmed', {
       journey: 'sender',
       ...assetProps(assetType, amountUsdEquiv),
       ...(expiryDays !== undefined ? conditional.expiryDays(expiryDays) : {}),
       ...(walletType ? { wallet_type: walletType } : {}),
+      wallet_provider: walletProvider,
     }),
+  /**
+   * §4.3 `Wallet Connection Failed` — fires when a connection attempt fails,
+   * alongside the `Error Displayed` that reports the same failure to §6.
+   * The two answer different questions: `Error Displayed` says an error was
+   * shown, this says a connect attempt was lost, which is what provider-level
+   * connection-failure rates are computed from.
+   */
+  walletConnectionFailed: ({
+    walletProvider = WALLET_PROVIDERS.unknown,
+    errorCode = 'unknown',
+  }: {
+    walletProvider?: WalletProvider;
+    errorCode?: string;
+  } = {}) =>
+    track('Wallet Connection Failed', {
+      journey: 'sender',
+      wallet_provider: walletProvider,
+      error_code: errorCode,
+    }),
+  /**
+   * 4.4 Payment Success Viewed - fires when the success screen with the
+   * claim link is rendered, i.e. once the sender has an account created and a
+   * link to share.
+   */
+  paymentSuccessViewed: ({
+    claimId,
+    assetType,
+    amountUsdEquiv,
+  }: {
+    claimId: string;
+    assetType?: string;
+    amountUsdEquiv?: number;
+  }) =>
+    track('Payment Success Viewed', {
+      journey: 'sender',
+      ...conditional.claimId(claimId),
+      ...assetProps(assetType, amountUsdEquiv),
+    }),
+
   paymentCreated: ({
     claimId,
     assetType,

@@ -189,8 +189,8 @@ These properties are included only where relevant and marked `(if available)` in
 |----------|------|-------------|
 | `claim_id` | string | Unique ID for the claim/payment |
 | `asset_type` | string | `"XLM"`, `"USDC"`, etc. |
-| `amount_usd_equiv` | number | USD equivalent at time of event |
-| `expiry_days` | number | `1`, `7`, `30`, `90`, or `null` (never) |
+| `amount_usd_equiv` | number | USD equivalent at time of event. Omitted entirely when the price is unavailable — never `0` |
+| `expiry_days` | number | `1`, `3`, `7`, `30`, `90`, or `null` (never). `3` is the 72-hour window the send form offers |
 | `error_code` | string | Machine-readable error identifier |
 | `error_type` | string | Category of error (see §6) |
 
@@ -309,8 +309,8 @@ Fired when the sender successfully connects their wallet.
 | Property | Type | Value / Description |
 |----------|------|---------------------|
 | `journey` | string | `"sender"` |
-| `wallet_type` | string | Human-readable wallet provider name, free-form (e.g., `"Freighter"`, `"Albedo"`, `"xBull"`). For display and for providers that are not in the `wallet_provider` closed set |
-| `wallet_provider` | string | **Closed set:** `"freighter"`, `"lobstr"`, `"generated"` — the connection path that was used (see below) |
+| `wallet_provider` | string | Closed set: `"freighter"`, `"lobstr"`, `"generated"`, `"unknown"` |
+| `wallet_type` | string | Display name of the provider (e.g., `"Freighter"`). Retained for readability; group by `wallet_provider` instead |
 
 ---
 
@@ -321,23 +321,35 @@ Fired when wallet connection is attempted but fails.
 | Property | Type | Value / Description |
 |----------|------|---------------------|
 | `journey` | string | `"sender"` |
-| `wallet_type` | string | Human-readable attempted wallet provider, free-form (same rules as `Wallet Connected`) |
-| `wallet_provider` | string | **Closed set:** `"freighter"`, `"lobstr"`, `"generated"` — the connection path that was attempted |
-| `error_code` | string | Provider error code or `"unknown"` |
+| `wallet_provider` | string | Closed set: `"freighter"`, `"lobstr"`, `"generated"`, `"unknown"` |
+| `wallet_type` | string | Display name of the attempted provider. Retained for readability; group by `wallet_provider` instead |
+| `error_code` | string | Provider error code, or `"unknown"` |
+
+`wallet_provider` names the provider that was *attempted*, which is known even
+when the failure happened before it responded — a missing extension and a
+declined permission prompt are both `"freighter"` here. Connection failure rate
+is expected to differ sharply by provider (a version-pinned extension release
+shows up as a `freighter`-only spike), so this is a first-class dimension
+rather than free text.
+
+`error_code` distinguishes the failure modes: `"FREIGHTER_NOT_INSTALLED"`,
+`"CONNECTION_DENIED"` (the user dismissed the prompt), `"NO_ADDRESS_RETURNED"`,
+or `"UNKNOWN"`.
 
 **`wallet_provider` values (closed set)**
 
-Both wallet events carry the same `wallet_provider` value, so `Wallet Connection Failed` can be broken down by connection path (the failure rate differs sharply by provider, and a provider-specific regression — for example a Freighter API version pin — is only visible when the provider is recorded). The three values match the `WalletType` union in `frontend/lib/wallet.ts`:
+Both wallet events carry the same `wallet_provider` value, so `Wallet Connection Failed` can be broken down by connection path (the failure rate differs sharply by provider, and a provider-specific regression — for example a Freighter API version pin — is only visible when the provider is recorded). The values match the `WALLET_PROVIDERS` union in `frontend/lib/analytics.ts` in `frontend/lib/wallet.ts`:
 
 | `wallet_provider` value | Connection path | Notes |
 |-------------------------|-----------------|-------|
 | `freighter` | Live connection to the Freighter browser extension | The only path wired into the UI today |
 | `lobstr` | LOBSTR paste-your-public-key flow | `connectLobstr()` throws `USE_PASTE_FLOW`; a live SDK connection does not exist |
 | `generated` | Client-side keypair from `generateNewWallet()` | The user never connects an external wallet; a key is created for them |
+| `unknown` | Provider could not be identified | The honest default when the failure happened before the provider was known; emitters that cannot identify the connection path send this rather than guessing |
 
-Definitions of the three paths, and how `generated` relates to the custodial funding key, are maintained in `bridgelet-product-audit/glossary/wallet-connection-types.md` and `bridgelet-product-audit/glossary/custodial-model-in-practice.md`. Send the lowercase enum value, never the display label.
+Definitions of the four paths, and how `generated` relates to the custodial funding key, are maintained in `bridgelet-product-audit/glossary/wallet-connection-types.md` and `bridgelet-product-audit/glossary/custodial-model-in-practice.md`. Send the lowercase enum value, never the display label.
 
-> **Implementation status:** Neither event is emitted from `frontend/` today. `Wallet Connected` and `Wallet Connection Failed` are defined here before implementation, per the pre-flight runbook `bridgelet-product-audit/runbooks/review-analytics-spec-before-new-event.md`. See `docs/analytics-server-vs-client-decision.md` §2.
+> **Implementation status:** `Wallet Connection Failed` is emitted from `frontend/components/send-form/steps/connect-step.tsx` (and `Wallet Connected` from `lib/wallet.ts`). `WalletProvider` in `frontend/lib/wallet.ts`, per the pre-flight runbook `bridgelet-product-audit/runbooks/review-analytics-spec-before-new-event.md`. See `docs/analytics-server-vs-client-decision.md` §2.
 
 ---
 
@@ -363,8 +375,10 @@ Fired when the sender clicks "Confirm & Pay" and signs the transaction. This ind
 |----------|------|---------------------|
 | `journey` | string | `"sender"` |
 | `asset_type` | string | |
+| `amount_usd_equiv` | number | Omitted when the price is unavailable — never sent as `0` |
 | `expiry_days` | number \| null | |
-| `wallet_type` | string | |
+| `wallet_provider` | string | Closed set: `"freighter"`, `"lobstr"`, `"generated"`, `"unknown"` |
+| `wallet_type` | string | Display name. Retained for readability; group by `wallet_provider` instead |
 
 ---
 
@@ -1011,6 +1025,20 @@ Claim Link Shared        ← activation milestone
 > `Payment Created`, so counting it as a success overcounts by exactly the
 > on-chain failure rate. See §4.3 `Payment Confirmed` for the full note.
 | 7 | `Claim Link Shared` | % who actively share (vs. just copy) |
+
+**Abandonment is measured as absence, not as an event.** A sender who starts
+the form and then closes the tab produces `Send Form Started` and nothing
+further. There is deliberately no "abandoned" or "session timeout" event: the
+drop-off from any stage to the next is `1 - (next stage count / stage count)`
+over the same `session_id`, and an explicit abandonment event would double
+count every real failure that already fires its own event (`Payment Creation
+Failed`, `Claim Failed`) while still missing the tab-closed case.
+
+This applies symmetrically to every stage in this funnel and to §7.2. When
+building a dashboard, compute drop-off from stage counts rather than waiting
+for a negative signal that will never arrive. Do not attribute a drop to a
+failure without checking for the paired failure event first — a session that
+emits `Payment Creation Failed` was already explained by that event.
 
 #### Funnel Drop-off & Partial Abandonment Measurement Methodology
 
