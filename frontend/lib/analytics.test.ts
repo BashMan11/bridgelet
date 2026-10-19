@@ -31,6 +31,7 @@ import {
   type ClaimFailedErrorType,
   type ExplorerJourney,
   type ExplorerSourceScreen,
+  type SendFormFieldName,
   VALID_EXPIRY_WINDOWS,
   validatePayload,
   type ValidationError,
@@ -215,6 +216,191 @@ describe('conditional props wired into emitted events', () => {
     expect(call[1].props).toEqual(
       expect.objectContaining({ journey: 'recipient', claim_id: 'tok_abc', asset_type: 'XLM' }),
     );
+  });
+});
+
+describe('analytics.sendFormFieldChanged (§4.2 / #774)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    delete (window as unknown as { plausible?: unknown }).plausible;
+  });
+
+  const mockPlausible = () =>
+    ((window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible =
+      plausibleMock());
+
+  const latest = () =>
+    (window as unknown as { plausible: ReturnType<typeof plausibleMock> }).plausible.mock
+      .calls[0]!;
+
+  it.each(['amount', 'recipient_name', 'message'] as SendFormFieldName[])(
+    'emits Send Form Field Changed with field_name=%s and journey=sender',
+    (fieldName) => {
+      mockPlausible();
+      analytics.sendFormFieldChanged({ fieldName });
+
+      const call = latest();
+      expect(call[0]).toBe('Send Form Field Changed');
+      expect(call[1].props).toEqual(
+        expect.objectContaining({ journey: 'sender', field_name: fieldName }),
+      );
+    },
+  );
+
+  it('attaches asset_type when field is "asset" and assetType is provided', () => {
+    mockPlausible();
+    analytics.sendFormFieldChanged({ fieldName: 'asset', assetType: 'USDC' });
+    expect(latest()[1].props).toEqual(
+      expect.objectContaining({ field_name: 'asset', asset_type: 'USDC' }),
+    );
+  });
+
+  it('omits asset_type when field is "asset" but no assetType is given', () => {
+    mockPlausible();
+    analytics.sendFormFieldChanged({ fieldName: 'asset' });
+    const props = latest()[1].props as Record<string, unknown>;
+    expect(props.field_name).toBe('asset');
+    expect('asset_type' in props).toBe(false);
+  });
+
+  it('attaches expiry_days when field is "expiration"', () => {
+    mockPlausible();
+    analytics.sendFormFieldChanged({ fieldName: 'expiration', expiryDays: 7 });
+    expect(latest()[1].props).toEqual(
+      expect.objectContaining({ field_name: 'expiration', expiry_days: 7 }),
+    );
+  });
+
+  it('attaches expiry_days: null when field is "expiration" and expiryDays is null', () => {
+    mockPlausible();
+    analytics.sendFormFieldChanged({ fieldName: 'expiration', expiryDays: null });
+    const props = latest()[1].props as Record<string, unknown>;
+    expect(props.field_name).toBe('expiration');
+    expect(props).toHaveProperty('expiry_days', null);
+  });
+
+  it('omits expiry_days when field is not "expiration"', () => {
+    mockPlausible();
+    analytics.sendFormFieldChanged({ fieldName: 'amount' });
+    const props = latest()[1].props as Record<string, unknown>;
+    expect('expiry_days' in props).toBe(false);
+  });
+});
+
+describe('expiry_days null serialisation (§3.2 / #818)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    delete (window as unknown as { plausible?: unknown }).plausible;
+  });
+
+  const mockPlausible = () =>
+    ((window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible =
+      plausibleMock());
+
+  const propsOf = () =>
+    (window as unknown as { plausible: ReturnType<typeof plausibleMock> }).plausible.mock
+      .calls[0]![1].props as Record<string, unknown>;
+
+  it('sendFormCompleted serialises expiry_days: null correctly', () => {
+    mockPlausible();
+    analytics.sendFormCompleted({ expiryDays: null, hasRecipientName: true, hasMessage: false });
+    expect(propsOf()).toHaveProperty('expiry_days', null);
+  });
+
+  it('paymentConfirmationViewed serialises expiry_days: null correctly', () => {
+    mockPlausible();
+    analytics.paymentConfirmationViewed({ expiryDays: null });
+    expect(propsOf()).toHaveProperty('expiry_days', null);
+  });
+
+  it('paymentConfirmed serialises expiry_days: null correctly', () => {
+    mockPlausible();
+    analytics.paymentConfirmed({ walletType: 'Freighter', expiryDays: null });
+    expect(propsOf()).toHaveProperty('expiry_days', null);
+  });
+
+  it('paymentCreated serialises expiry_days: null correctly', () => {
+    mockPlausible();
+    analytics.paymentCreated({ claimId: 'tok_null_expiry', confirmationTimeMs: 100, expiryDays: null });
+    expect(propsOf()).toHaveProperty('expiry_days', null);
+  });
+
+  it('sendFormCompleted omits expiry_days when the param is not provided', () => {
+    mockPlausible();
+    analytics.sendFormCompleted({ hasRecipientName: false, hasMessage: false });
+    expect('expiry_days' in propsOf()).toBe(false);
+  });
+});
+
+describe('analytics.walletConnectionFailed (§4.3 / #819)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    delete (window as unknown as { plausible?: unknown }).plausible;
+  });
+
+  const mockPlausible = () =>
+    ((window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible =
+      plausibleMock());
+
+  const latest = () =>
+    (window as unknown as { plausible: ReturnType<typeof plausibleMock> }).plausible.mock
+      .calls[0]!;
+
+  it('emits Wallet Connection Failed with error_code and journey=sender', () => {
+    mockPlausible();
+    analytics.walletConnectionFailed({ errorCode: 'USER_REJECTED' });
+    const call = latest();
+    expect(call[0]).toBe('Wallet Connection Failed');
+    expect(call[1].props).toEqual(
+      expect.objectContaining({ journey: 'sender', error_code: 'USER_REJECTED' }),
+    );
+  });
+
+  it('defaults error_code to "unknown" when not provided', () => {
+    mockPlausible();
+    analytics.walletConnectionFailed();
+    expect(latest()[1].props).toEqual(expect.objectContaining({ error_code: 'unknown' }));
+  });
+});
+
+describe('analytics.paymentCreationFailed (§4.4 / #819)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    delete (window as unknown as { plausible?: unknown }).plausible;
+  });
+
+  const mockPlausible = () =>
+    ((window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible =
+      plausibleMock());
+
+  const latest = () =>
+    (window as unknown as { plausible: ReturnType<typeof plausibleMock> }).plausible.mock
+      .calls[0]!;
+
+  it('emits Payment Creation Failed with error_code and journey=sender', () => {
+    mockPlausible();
+    analytics.paymentCreationFailed({ errorCode: 'TX_FAILED' });
+    const call = latest();
+    expect(call[0]).toBe('Payment Creation Failed');
+    expect(call[1].props).toEqual(
+      expect.objectContaining({ journey: 'sender', error_code: 'TX_FAILED' }),
+    );
+  });
+
+  it('attaches asset_type when provided', () => {
+    mockPlausible();
+    analytics.paymentCreationFailed({ errorCode: 'TX_FAILED', assetType: 'USDC' });
+    expect(latest()[1].props).toEqual(expect.objectContaining({ asset_type: 'USDC' }));
+  });
+
+  it('defaults error_code to "unknown" when not provided', () => {
+    mockPlausible();
+    analytics.paymentCreationFailed();
+    expect(latest()[1].props).toEqual(expect.objectContaining({ error_code: 'unknown' }));
   });
 });
 
@@ -2013,4 +2199,40 @@ describe('payload verification', () => {
 
     expect(warn).not.toHaveBeenCalled();
   });
+});
+
+// ── Claim Link Shared (#784) ─────────────────────────────────────────────────
+//
+// Issue #784 asked for a `track('Claim Link Shared', …)` call at the point the
+// sender actively shares the claim link. The emitter and its WhatsApp call site
+// were already delivered by PR #751 (see
+// `bridgelet-product-audit/postmortems/issue-784-claim-link-shared-already-implemented.md`).
+// This block locks in the §4.4 payload so it cannot silently regress.
+describe('analytics.claimLinkShared (§4.4)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    delete (window as unknown as { plausible?: unknown }).plausible;
+  });
+
+  it.each(['sms', 'email', 'whatsapp', 'qr_code'] as const)(
+    'emits Claim Link Shared with share_method "%s"',
+    (shareMethod) => {
+      (window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible =
+        plausibleMock();
+
+      analytics.claimLinkShared({ claimId: 'acct_123', shareMethod });
+
+      const call = (window as unknown as { plausible: ReturnType<typeof plausibleMock> })
+        .plausible.mock.calls[0]!;
+      expect(call[0]).toBe('Claim Link Shared');
+      expect(call[1].props).toEqual(
+        expect.objectContaining({
+          journey: 'sender',
+          claim_id: 'acct_123',
+          share_method: shareMethod,
+        }),
+      );
+    },
+  );
 });
