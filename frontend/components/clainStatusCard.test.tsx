@@ -1,8 +1,10 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ClaimStatusCard } from './claim-status-card';
 import { RateLimitError } from '@/lib/api/client';
+import { ClaimError } from '@/lib/claim-errors';
+import { analytics } from '@/lib/analytics';
 import { AccountStatus } from '@/lib/api/types';
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────
@@ -246,5 +248,282 @@ describe('ClaimStatusCard', () => {
       const { unmount } = render(<ClaimStatusCard status={status} />);
       unmount();
     });
+  });
+});
+// ─── Dark-mode contrast and focus styling (#761) ───────────────────────────
+
+describe('ClaimStatusCard dark mode', () => {
+  function addressInput(): HTMLInputElement {
+    return screen.getByLabelText(/your stellar wallet address/i) as HTMLInputElement;
+  }
+
+  it('gives the address input an explicit background and dark-mode text colour', () => {
+    render(
+      <ClaimStatusCard
+        claimId="claim_abc"
+        status={AccountStatus.PENDING_CLAIM}
+        amountStroops="10000000"
+      />,
+    );
+
+    const className = addressInput().className;
+    // Without an explicit light background the field inherits the card's, and
+    // without a dark text colour the typed address rendered dark-on-dark.
+    expect(className).toContain('bg-white');
+    expect(className).toContain('dark:bg-slate-800');
+    expect(className).toContain('dark:text-slate-100');
+    expect(className).toContain('dark:placeholder-slate-500');
+  });
+
+  it('uses a tight ring rather than a floating outline for focus', () => {
+    render(
+      <ClaimStatusCard
+        claimId="claim_abc"
+        status={AccountStatus.PENDING_CLAIM}
+        amountStroops="10000000"
+      />,
+    );
+
+    const className = addressInput().className;
+    expect(className).toContain('focus:ring-1');
+    // The old pattern drew a 2px outline offset 2px away from the border, which
+    // stacked a second ring on top of the card's green border.
+    expect(className).not.toContain('outline-offset-2');
+  });
+
+  it('keeps a focus indicator on the claim button', () => {
+    render(
+      <ClaimStatusCard
+        claimId="claim_abc"
+        status={AccountStatus.PENDING_CLAIM}
+        amountStroops="10000000"
+      />,
+    );
+
+    const button = screen.getByRole('button', { name: /claim now/i });
+    // WCAG 2.4.7: the indicator must remain, just not as a doubled outline.
+    expect(button.className).toContain('focus-visible:ring-2');
+    expect(button.className).toContain('dark:focus-visible:ring-offset-slate-900');
+  });
+
+  it('makes the amount and its placeholder legible in dark mode', () => {
+    const { container } = render(
+      <ClaimStatusCard
+        claimId="claim_abc"
+        status={AccountStatus.PENDING_CLAIM}
+        amountStroops="10000000"
+      />,
+    );
+
+    const amountValue = container.querySelector('dd.font-semibold');
+    expect(amountValue?.className).toContain('dark:text-slate-50');
+
+    render(<ClaimStatusCard status={AccountStatus.PENDING_CLAIM} />);
+    const placeholder = screen.getAllByText('—')[0]!;
+    expect(placeholder.className).toContain('dark:text-slate-500');
+  });
+
+  it('gives the labels, validation hint and error box dark variants', () => {
+    const { container } = render(
+      <ClaimStatusCard
+        claimId="claim_abc"
+        status={AccountStatus.PENDING_CLAIM}
+        amountStroops="10000000"
+      />,
+    );
+
+    expect(screen.getByText(/your stellar wallet address/i).className).toContain(
+      'dark:text-slate-300',
+    );
+
+    setDestinationAddress('nope');
+    const hint = screen.getByText(/enter a valid stellar public key/i);
+    expect(hint.className).toContain('dark:text-red-400');
+
+    // The claim error box is only reachable through a rejected submission, but
+    // the class list is static, so assert it on the rendered panel.
+    expect(container.querySelector('[role="alert"]')).toBeDefined();
+  });
+
+  it('uses a quieter card border in dark mode', () => {
+    render(
+      <ClaimStatusCard
+        claimId="claim_abc"
+        status={AccountStatus.PENDING_CLAIM}
+        amountStroops="10000000"
+      />,
+    );
+
+    const article = screen.getByRole('article');
+    expect(article.className).toContain('dark:border-green-800');
+  });
+});
+
+
+// -- Recipient instrumentation (#793 / #794 / #824 / #819 / #914) ----------------
+describe('ClaimStatusCard analytics', () => {
+  beforeEach(() => {
+    // `analytics` is a plain object whose methods are looked up at call time,
+    // so spying is enough to observe the events without stubbing the module.
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('reports the wallet address screen when the claim is available', () => {
+    const spy = vi
+      .spyOn(analytics, 'walletAddressScreenViewed')
+      .mockImplementation(() => undefined);
+
+    render(
+      <ClaimStatusCard
+        claimId="claim_abc"
+        status={AccountStatus.PENDING_CLAIM}
+        amountStroops="10000000"
+      />,
+    );
+
+    expect(spy).toHaveBeenCalledWith({ claimId: 'claim_abc', hasPreviousAddress: false });
+  });
+
+  it('does not report the address screen for other statuses', () => {
+    const spy = vi
+      .spyOn(analytics, 'walletAddressScreenViewed')
+      .mockImplementation(() => undefined);
+
+    render(<ClaimStatusCard status={AccountStatus.CLAIMED} claimId="claim_abc" />);
+
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('reports an entered address when the submission passes validation', async () => {
+    const entered = vi
+      .spyOn(analytics, 'walletAddressEntered')
+      .mockImplementation(() => undefined);
+
+    const user = userEvent.setup({ delay: null });
+    render(
+      <ClaimStatusCard
+        claimId="claim_abc"
+        status={AccountStatus.PENDING_CLAIM}
+        amountStroops="10000000"
+        onClaim={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    setDestinationAddress(VALID_ADDRESS);
+    await user.click(screen.getByRole('button', { name: /claim now/i }));
+
+    expect(entered).toHaveBeenCalledWith({ claimId: 'claim_abc', usedPreviousAddress: false });
+  });
+
+  it('reports an invalid address exactly once per editing episode', () => {
+    const validationFailed = vi
+      .spyOn(analytics, 'walletAddressValidationFailed')
+      .mockImplementation(() => undefined);
+    const errorDisplayed = vi
+      .spyOn(analytics, 'errorDisplayed')
+      .mockImplementation(() => undefined);
+
+    render(
+      <ClaimStatusCard
+        claimId="claim_abc"
+        status={AccountStatus.PENDING_CLAIM}
+        amountStroops="10000000"
+      />,
+    );
+
+    setDestinationAddress('not-a-valid');
+    setDestinationAddress('still-not-valid');
+
+    expect(validationFailed).toHaveBeenCalledTimes(1);
+    expect(errorDisplayed).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorType: 'invalid_wallet_address',
+        errorCode: expect.stringContaining('INVALID_ADDRESS_'),
+      }),
+    );
+  });
+
+  it('reports the originating error on a retry rather than a blanket unknown', async () => {
+    const retryClicked = vi.spyOn(analytics, 'retryClicked').mockImplementation(() => undefined);
+    vi.spyOn(analytics, 'walletAddressEntered').mockImplementation(() => undefined);
+    vi.spyOn(analytics, 'errorDisplayed').mockImplementation(() => undefined);
+
+    const user = userEvent.setup({ delay: null });
+    const onClaim = vi
+      .fn()
+      .mockRejectedValueOnce(new ClaimError('SUBMISSION_FAILED_RETRYABLE', 'Try again.', true))
+      .mockResolvedValue(undefined);
+
+    render(
+      <ClaimStatusCard
+        claimId="claim_abc"
+        status={AccountStatus.PENDING_CLAIM}
+        amountStroops="10000000"
+        onClaim={onClaim}
+      />,
+    );
+
+    setDestinationAddress(VALID_ADDRESS);
+    await user.click(screen.getByRole('button', { name: /claim now/i }));
+    await screen.findByRole('alert');
+
+    await user.click(screen.getByRole('button', { name: /claim now/i }));
+
+    expect(retryClicked).toHaveBeenCalledWith(
+      expect.objectContaining({
+        errorType: 'network_unavailable',
+        errorCode: 'SUBMISSION_FAILED_RETRYABLE',
+      }),
+    );
+  });
+
+  it('omits the explorer link when no sweep transaction hash is known', () => {
+    render(
+      <ClaimStatusCard
+        claimId="claim_abc"
+        status={AccountStatus.CLAIMED}
+        claimedByMe
+        sweepDestination={VALID_ADDRESS}
+      />,
+    );
+
+    expect(screen.queryByRole('link', { name: /stellar explorer/i })).not.toBeInTheDocument();
+  });
+
+  it('renders the explorer link when a transaction hash is known', () => {
+    const txHash = 'd'.repeat(64);
+    render(
+      <ClaimStatusCard
+        claimId="claim_abc"
+        status={AccountStatus.CLAIMED}
+        claimedByMe
+        sweepDestination={VALID_ADDRESS}
+        sweepTxHash={txHash}
+      />,
+    );
+
+    expect(screen.getByRole('link', { name: /stellar explorer/i }).getAttribute('href')).toContain(
+      txHash,
+    );
+  });
+
+  it('never puts the claim token in an explorer URL', () => {
+    render(
+      <ClaimStatusCard
+        claimId="tok_secret_claim_token"
+        status={AccountStatus.CLAIMED}
+        claimedByMe
+        sweepDestination={VALID_ADDRESS}
+        sweepTxHash={'e'.repeat(64)}
+      />,
+    );
+
+    expect(
+      screen.getByRole('link', { name: /stellar explorer/i }).getAttribute('href'),
+    ).not.toContain('tok_secret_claim_token');
   });
 });

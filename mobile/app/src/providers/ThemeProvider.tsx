@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from "react";
 import { useColorScheme } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { JOURNEYS, track } from "../analytics/analytics";
 
 const THEME_KEY = "user_theme_override";
 
@@ -60,6 +61,17 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const setMode = (next: ThemeMode) => {
+    // Recorded here rather than in `ThemeToggle` because this is the point the
+    // preference actually changes, so it is captured however it was reached —
+    // including the restored-on-launch path, and the currently unrendered
+    // `ThemeToggle` component. Selecting the mode already in effect is not an
+    // interaction worth recording.
+    if (next !== mode) {
+      track({
+        name: "Theme Changed",
+        params: { journey: JOURNEYS.shared, from: mode, to: next },
+      });
+    }
     setModeState(next);
     AsyncStorage.setItem(THEME_KEY, next);
   };
