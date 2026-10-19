@@ -804,14 +804,17 @@ export const VALID_EXPIRY_WINDOWS = [1, 7, 30, 90] as const;
 export type ExpiryDays = (typeof VALID_EXPIRY_WINDOWS)[number] | null;
 
 export const conditional = {
-  claimId: (claimId: string): EventProps => ({ claim_id: claimId }),
-  assetType: (assetType: string): EventProps => ({ asset_type: assetType }),
-  amountUsdEquiv: (amountUsdEquiv: number): EventProps => ({
+  // Return types are inferred rather than annotated as EventProps. Spreading an
+  // index-signature type into an object literal erases the known keys from the
+  // literal's inferred type, which defeats the per-event payload map (#854).
+  claimId: (claimId: string) => ({ claim_id: claimId }),
+  assetType: (assetType: string) => ({ asset_type: assetType }),
+  amountUsdEquiv: (amountUsdEquiv: number) => ({
     amount_usd_equiv: amountUsdEquiv,
   }),
-  expiryDays: (expiryDays: ExpiryDays | number): EventProps => ({ expiry_days: expiryDays }),
-  errorType: (errorType: ErrorType | string): EventProps => ({ error_type: errorType }),
-  errorCode: (errorCode: string): EventProps => ({ error_code: errorCode }),
+  expiryDays: (expiryDays: ExpiryDays | number) => ({ expiry_days: expiryDays }),
+  errorType: <T extends ErrorType | string>(errorType: T) => ({ error_type: errorType }),
+  errorCode: (errorCode: string) => ({ error_code: errorCode }),
 };
 
 export type SendFormFieldName =
@@ -1001,12 +1004,12 @@ type EventPayloadShapes = {
   'Send Form Viewed': { journey?: Journey };
   'Send Form Started': { journey?: Journey; first_field: SendFormField };
   'Send Form Field Changed': { journey?: Journey; field_name: SendFormField; asset_type?: string; expiry_days?: number | null };
-  'Send Form Completed': { journey?: Journey; asset_type?: string; expiry_days?: number; has_recipient_name: boolean; has_message: boolean };
-  'Payment Confirmation Viewed': { journey?: Journey; asset_type?: string; expiry_days?: number };
+  'Send Form Completed': { journey?: Journey; asset_type?: string; expiry_days?: number | null; has_recipient_name: boolean; has_message: boolean };
+  'Payment Confirmation Viewed': { journey?: Journey; asset_type?: string; expiry_days?: number | null };
   'Wallet Connected': { journey?: Journey; wallet_type?: string; wallet_provider: WalletProviderPath };
-  'Wallet Connection Failed': { journey?: Journey; wallet_type?: string; wallet_provider: WalletProviderPath; error_code?: string };
-  'Payment Confirmed': { journey?: Journey; asset_type?: string; expiry_days?: number; wallet_type?: string };
-  'Payment Created': { journey?: Journey; claim_id: string; asset_type?: string; expiry_days?: number; confirmation_time_ms: number };
+  'Wallet Connection Failed': { journey?: Journey; wallet_type?: string; wallet_provider?: WalletProviderPath; error_code?: string };
+  'Payment Confirmed': { journey?: Journey; asset_type?: string; expiry_days?: number | null; wallet_type?: string };
+  'Payment Created': { journey?: Journey; claim_id: string; asset_type?: string; expiry_days?: number | null; confirmation_time_ms: number };
   'Payment Creation Failed': { journey?: Journey; asset_type?: string; error_code?: string };
   'Payment Success Viewed': { journey?: Journey; claim_id: string; asset_type?: string };
   'Claim Link Copied': { journey?: Journey; claim_id: string; copy_location: 'success_screen' | 'dashboard_detail' };
