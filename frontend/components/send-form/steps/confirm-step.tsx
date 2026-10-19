@@ -289,6 +289,11 @@ export function ConfirmStep({ state, usdRate, onBack }: ConfirmStepProps) {
       setRetryCount(attempt);
       setSubmitPhase('idle');
       submitGuardRef.current = false;
+      analytics.paymentCreationFailed({
+        assetType: state.assetCode,
+        errorCode: (err instanceof FundingError ? err.code : info.code) || 'unknown',
+      });
+
 
       // §6 `Error Displayed` — this panel is the send flow's largest error
       // surface and previously emitted nothing at all, which left the

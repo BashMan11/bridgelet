@@ -748,7 +748,7 @@ let warnedNoProvider = false;
  * `docs/analytics-server-vs-client-decision.md` (#845). Nothing moves until
  * the SDK owns emission; do not dual-emit.
  */
-function track<E extends ClaimEvent>(event: E, props: EventPayloadMap[E]): void {
+export function track<E extends ClaimEvent>(event: E, props: EventPayloadMap[E]): void {
   if (typeof window === 'undefined') return;
 
   // Consent gate — before anything else, and before the §9.5 DNT check,
@@ -867,6 +867,11 @@ export const CLAIM_ENTRY_CHANNELS: readonly ClaimEntryChannel[] = [
 ];
 
 export type PaymentClaimStatus = 'unclaimed' | 'claimed' | 'expired';
+
+export interface PaymentCreationFailedProps {
+  assetType?: string;
+  errorCode?: string;
+}
 
 /**
  * Conditional payload properties (`docs/analytics-spec.md` §3.2) are
