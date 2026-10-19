@@ -156,6 +156,41 @@ Bridgelet's non-custodial architecture means:
 
 Integrators should consult legal counsel regarding their specific use case and jurisdiction.
 
+### What data does Bridgelet collect or track?
+
+Bridgelet's own reference apps record **product analytics** — which flows get
+used and where they break — and deliberately record as little as possible about
+who is using them.
+
+**What is recorded.** Aggregate interaction events (for example "a recipient
+opened a claim link" or "a sender completed a payment") with a base payload
+containing an anonymous, randomly generated identifier, a per-visit session
+identifier, a coarse device type, the app version, and whether the traffic is
+mainnet or testnet. Events can carry a claim/payment identifier and an amount,
+so that conversion and failure rates can be computed at all.
+
+**What is not recorded.** No wallet addresses, no claim tokens, no message
+contents, no names or email addresses, and no keys of any kind. Claim links are
+not forwarded to third parties, and the claim page deliberately loads no
+third-party script or asset.
+
+**How it is kept private.**
+
+- The anonymous identifier is a random UUID, not derived from anything about
+  you, and you can reset it by clearing your browser storage.
+- If your browser sends a **Do Not Track** signal, no events are recorded and
+  no identifier is created at all.
+- There is an explicit opt-out that stops all recording, independent of your
+  browser settings.
+- Nothing is used for advertising, profiling or sale.
+
+**One honest caveat:** because visitors who opt out record nothing, published
+usage rates are a lower bound — they describe the people who did not opt out.
+See `SECURITY.md` for how analytics data is scoped, and
+`docs/analytics-spec.md` §3.1 for the exact fields.
+
+---
+
 ### Who handles recipient data and privacy?
 
 **The SDK generates claim links. The integrator delivers them.**
@@ -165,6 +200,20 @@ This separation means:
 - **Integrator responsibility:** Collect recipient contact information, deliver links, comply with GDPR/privacy regulations
 
 The SDK stores account metadata (public keys, expiration, status). It does **not** store recipient email addresses, phone numbers, or personally identifiable information. Any PII handling is the integrator's domain.
+
+### What data does Bridgelet collect or track?
+
+Bridgelet adheres to strict privacy-by-design principles, especially given that the platform facilitates financial transactions:
+
+- **Zero Personally Identifiable Information (PII):** Bridgelet never logs or collects names, emails, phone numbers, or physical addresses.
+- **Wallet Addresses & On-Chain Privacy:**
+  - Recipient destination wallet addresses are used solely for building on-chain sweep transactions; they are **never** included in client-side or server-side analytics event payloads.
+  - Recipient wallet addresses are never exposed to or logged in sender-journey events.
+  - Sender public keys are recorded on-chain as the funding source, but are kept pseudonymous.
+- **Product & Analytics Event Tracking:**
+  - When telemetry/analytics instrumentation is active, tracking is strictly event-based (following [`docs/analytics-spec.md`](./docs/analytics-spec.md)) and uses client-generated random UUIDs (`anonymous_id`, `session_id`) rather than persistent personal identity.
+  - Event payloads record transaction metadata such as asset type (e.g. XLM, USDC), claim expiration duration, and interaction timestamps. Exact transfer amounts are excluded from general event payloads (or represented as USD equivalents where required for funnel performance).
+  - **Consent Gating & Do Not Track:** Telemetry respects browser-level `DNT` (Do Not Track) headers (`DNT: 1` suppresses all event tracking) and user consent preferences. No analytics events are dispatched without user consent.
 
 ---
 

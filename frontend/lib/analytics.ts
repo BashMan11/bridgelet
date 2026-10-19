@@ -1,5 +1,6 @@
 // #118 – Privacy-respecting analytics events (Plausible-compatible, no PII)
 // Event names must match `docs/analytics-spec.md` `#### \`Event Name\`` headings exactly.
+import { getSessionIdWithInactivity } from './analytics-session';
 type ClaimEvent =
   | 'Page Viewed'
   | 'Send Form Viewed'
@@ -34,11 +35,86 @@ type ClaimEvent =
   | 'Sender Signup CTA Clicked'
   | 'Explorer Link Clicked'
   | 'Error Displayed'
-  | 'Retry Clicked';
+  | 'Retry Clicked'
+  | 'Recovery Information Viewed'
+  | 'Recovery Information Copied';
 
 type EventProps = Record<string, string | number | boolean | null>;
 
 export type DeviceType = 'mobile' | 'tablet' | 'desktop';
+
+/**
+ * The `platform` dimension (`docs/analytics-spec.md` §3.1).
+ *
+ * Every event carries this field, so it is defined once here rather than
+ * repeated as a literal at each call site: a typo would split the dimension
+ * in two (`'web'` and `'Web'`) and silently fragment every dashboard that
+ * groups by platform. The mobile app has its own values (`ios`, `android`);
+ * adding one there does not require changing anything here.
+ */
+export const PLATFORMS = {
+  web: 'web',
+} as const;
+
+export type Platform = (typeof PLATFORMS)[keyof typeof PLATFORMS];
+
+/** The frontend's fixed §3.1 `platform` value. */
+export const PLATFORM: Platform = PLATFORMS.web;
+
+/**
+ * The `journey` dimension (`docs/analytics-spec.md` §3.1) — the single most
+ * important dimension for funnel segmentation, so every event carries it and
+ * no emitter may spell it ad-hoc.
+ */
+export const JOURNEYS = {
+  sender: 'sender',
+  recipient: 'recipient',
+  shared: 'shared',
+} as const;
+
+export type Journey = (typeof JOURNEYS)[keyof typeof JOURNEYS];
+
+/**
+ * The `network` dimension (`docs/analytics-spec.md` §3.1).
+ *
+ * `unknown` is a deliberate third member rather than a bug: it is what an
+ * unconfigured or misspelled `NEXT_PUBLIC_CRYPTO_NETWORK` reports. Falling
+ * back to `testnet` (as the rest of the app does when the variable is unset)
+ * would file real traffic into the testnet bucket, which is exactly the
+ * distinction §3.1 says exists so QA traffic can be excluded from
+ * production dashboards.
+ */
+export const ANALYTICS_NETWORKS = {
+  testnet: 'testnet',
+  mainnet: 'mainnet',
+  unknown: 'unknown',
+} as const;
+
+export type AnalyticsNetwork = (typeof ANALYTICS_NETWORKS)[keyof typeof ANALYTICS_NETWORKS];
+
+/**
+ * Resolves the §3.1 `network` field from `NEXT_PUBLIC_CRYPTO_NETWORK`, which
+ * carries the SDK's network identifiers (`stellar-testnet` /
+ * `stellar-mainnet`). Static member access keeps Next.js able to inline the
+ * value into the browser bundle.
+ */
+export function currentNetwork(): AnalyticsNetwork {
+  const configured = process.env['NEXT_PUBLIC_CRYPTO_NETWORK'];
+  if (configured === 'stellar-mainnet') return ANALYTICS_NETWORKS.mainnet;
+  if (configured === 'stellar-testnet') return ANALYTICS_NETWORKS.testnet;
+  return ANALYTICS_NETWORKS.unknown;
+}
+
+/**
+ * Coerces a caller-supplied `journey` into a valid §3.1 value. Anything
+ * unrecognised (including `undefined`) becomes `shared`, the only value that
+ * is truthful for an event not owned by one side of the flow.
+ */
+export function normalizeJourney(value: unknown): Journey {
+  return typeof value === 'string' && value in JOURNEYS
+    ? (value as Journey)
+    : JOURNEYS.shared;
+}
 
 /**
  * App version correlated to a deploy (`docs/analytics-spec.md` §3.1
@@ -64,8 +140,6 @@ export function detectDeviceType(userAgent?: string): DeviceType {
   return 'desktop';
 }
 
-export type AnalyticsNetwork = 'testnet' | 'mainnet';
-
 /**
  * Stellar network the build is pointed at (`docs/analytics-spec.md` §3.1
  * `network`), derived from NEXT_PUBLIC_CRYPTO_NETWORK (`stellar-testnet` |
@@ -85,26 +159,91 @@ export function detectNetwork(configured?: string): AnalyticsNetwork {
 
 /**
  * Base payload fields (`docs/analytics-spec.md` §3.1) shared by every
- * event: `app_version`, `user_agent` (the raw navigator UA string),
- * `device_type`, `referrer`, `network`, and the fixed frontend `platform`
- * value "web". Each field degrades gracefully when the browser API it
- * depends on is unavailable (SSR, unit tests without a DOM).
+ * event: `journey`, `timestamp`, `network`, `app_version`, `user_agent` (the
+ * raw navigator UA string), `device_type`, `referrer`, and the fixed frontend
+ * `platform` value "web". Each field degrades gracefully when the browser API
+ * it depends on is unavailable (SSR, unit tests without a DOM).
+ *
+ * `journey` is taken as an argument rather than read from a module-level value
+ * because it is a property of the *event*, not of the session: the same visitor
+ * is `sender` on `/send` and `recipient` on `/claim/[token]`. `track()` therefore
+ * passes the journey the emitter declared and callers that omit one are recorded
+ * as `shared`.
  */
-export function buildBasePayload(): EventProps {
+export function buildBasePayload(journey: Journey = JOURNEYS.shared): EventProps {
   return {
+    journey,
+    timestamp: new Date().toISOString(),
+    network: currentNetwork(),
     app_version: appVersion(),
     user_agent: typeof navigator !== 'undefined' ? navigator.userAgent : '',
     device_type: detectDeviceType(),
     referrer: typeof document !== 'undefined' && document.referrer ? document.referrer : null,
-    platform: 'web',
-    network: detectNetwork(),
+    platform: PLATFORM,
   };
+}
+
+// ─── Consent gate ─────────────────────────────────────────────────────────────
+
+/**
+ * Explicit opt-out, checked by `track()` before anything else happens.
+ *
+ * `docs/analytics-spec.md` §9.5 only covers Do Not Track, which is a
+ * browser-level signal that Bridgelet cannot
+ * influence; it is necessary but not sufficient. A wallet-connected product
+ * handling claim tokens and payment amounts should also be able to honour a
+ * decision the visitor made *on the site*, without asking them to configure
+ * their browser, and without editing their browser settings after the fact.
+ *
+ * The value is intentionally one-way in storage terms: absent means "no
+ * decision recorded yet", `'1'` means opted out. Opting back in clears the
+ * key rather than writing `'0'`, so a stale `'0'` can never outlive the
+ * reason it was written. Defaulting to allowed keeps today's behaviour for
+ * existing visitors while making the gate available to a future consent UI
+ * before any event ships.
+ */
+const OPT_OUT_KEY = 'bridgelet_analytics_opt_out';
+
+/**
+ * Reads the explicit opt-out flag.
+ *
+ * Returns `false` during SSR and when storage is unavailable (private
+ * mode, blocked cookies, quota exceeded): an unreadable preference is not
+ * the same as an expressed refusal, and failing open here matches the
+ * §9.5 behaviour while still leaving the DNT signal to catch anyone who set
+ * it at the browser level.
+ */
+export function isAnalyticsOptedOut(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return localStorage.getItem(OPT_OUT_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Records or clears the explicit opt-out. Pass `true` to stop tracking,
+ * `false` to resume. No-ops during SSR so a server render can never write
+ * to a visitor's storage.
+ */
+export function setAnalyticsOptedOut(optedOut: boolean): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (optedOut) {
+      localStorage.setItem(OPT_OUT_KEY, '1');
+    } else {
+      localStorage.removeItem(OPT_OUT_KEY);
+    }
+  } catch {
+    // Storage unavailable — the preference cannot be persisted, so there is
+    // nothing useful to do here. DNT still gates the event itself.
+  }
 }
 
 // ─── §3.1 Base Payload Identity fields ───────────────────────────────────────
 
 const ANONYMOUS_ID_KEY = 'bridgelet_anonymous_id';
-const SESSION_ID_KEY = 'bridgelet_session_id';
 
 /**
  * Generates a cryptographically-random UUID v4.
@@ -144,24 +283,15 @@ export function getAnonymousId(): string {
 }
 
 /**
- * Returns the session-scoped `session_id` for this browser tab/visit.
- * Generated once per session and stored in `sessionStorage`; reset when
- * the tab or browser session ends.
- * Returns an empty string in SSR or when storage is unavailable.
+ * Returns the session-scoped `session_id` for this browser visit
+ * (`docs/analytics-spec.md` §9.3): minted on first use, rotated after
+ * 30 minutes of inactivity, persisted in `sessionStorage`. Delegates to
+ * `lib/analytics-session.ts` (#633/#846) so the inactivity rule has one
+ * owner and its own tests. Empty string in SSR or when storage is
+ * unavailable (unchanged contract).
  */
 export function getSessionId(): string {
-  if (typeof window === 'undefined') return '';
-  try {
-    let id = sessionStorage.getItem(SESSION_ID_KEY);
-    if (!id) {
-      id = generateUUID();
-      sessionStorage.setItem(SESSION_ID_KEY, id);
-    }
-    return id;
-  } catch {
-    // sessionStorage unavailable.
-    return '';
-  }
+  return getSessionIdWithInactivity(generateUUID);
 }
 
 // ─── §6 Error taxonomy ────────────────────────────────────────────────────────
@@ -325,9 +455,10 @@ export function createDeduplicationStore(
       prune(now);
       if (seen.has(key)) {
         // Refresh recency so a hot claim is not evicted by the cap while
-        // older idle claims are.
+        // older idle claims are, but preserve recordedAt so TTL expiry is preserved.
+        const recordedAt = seen.get(key)!;
         seen.delete(key);
-        seen.set(key, now);
+        seen.set(key, recordedAt);
         return true;
       }
       seen.set(key, now);
@@ -373,78 +504,299 @@ function isDuplicateClaimEvent(event: ClaimEvent, claimId: unknown): boolean {
 
 // ─── track() ──────────────────────────────────────────────────────────────────
 
+// ─── Provider availability queue ───────────────────────────────────────────────
+
 /**
- * Core dispatch function. Merges the §3.1 identity fields (`anonymous_id`,
- * `session_id`) into every event payload so every downstream event carries
- * them without any per-call plumbing.
+ * Events captured before a provider was ready, waiting to be replayed.
  *
- * This is the only place an event reaches the provider, so both opt-out
- * (§9.5) and deduplication (§9.4) are enforced here rather than at call
- * sites — no emitter can forget them.
+ * `Page Viewed` and `Claim Page Opened` are page-load events, and
+ * `PlausibleScript` injects the provider script with `async defer`
+ * (`components/plausible-script.tsx`) — so on a cold load the provider is
+ * routinely absent for the first few hundred milliseconds and those events
+ * used to be dropped on the floor. Queueing them and replaying once the
+ * provider appears is the pattern Plausible itself documents for exactly
+ * this race.
+ *
+ * The queue is bounded: it is per-tab in-memory state that an analytics
+ * helper must never let grow without limit, and the entries it holds are
+ * the *earliest* events of a visit, which are also the least useful once
+ * stale. On overflow the oldest entry is dropped, so a tab left open with
+ * no provider degrades to keeping the most recent events rather than
+ * growing without bound.
+ */
+export const PENDING_QUEUE_MAX_EVENTS = 50;
+
+/**
+ * How long to keep retrying a flush while no provider has appeared.
+ *
+ * Bounded on purpose: a queue that retries forever keeps a timer alive for
+ * the life of the tab. 30 attempts at 500ms is 15s, comfortably longer than
+ * a slow third-party script on a poor connection, and after that the events
+ * are dropped rather than retained indefinitely in memory.
+ */
+export const PENDING_FLUSH_INTERVAL_MS = 500;
+export const PENDING_FLUSH_ATTEMPTS = 30;
+
+interface PendingEvent {
+  event: ClaimEvent;
+  payload: EventProps;
+}
+
+const pendingEvents: PendingEvent[] = [];
+let pendingFlushAttempts = 0;
+let pendingFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Events waiting for a provider. Exposed for diagnostics and tests. */
+export function pendingEventCount(): number {
+  return pendingEvents.length;
+}
+
+/** Discards queued events. Exposed for tests and for an explicit opt-out. */
+export function clearPendingEvents(): void {
+  pendingEvents.length = 0;
+  if (pendingFlushTimer !== null) {
+    clearTimeout(pendingFlushTimer);
+    pendingFlushTimer = null;
+  }
+  pendingFlushAttempts = 0;
+}
+
+function queuePendingEvent(event: ClaimEvent, payload: EventProps): void {
+  pendingEvents.push({ event, payload });
+  while (pendingEvents.length > PENDING_QUEUE_MAX_EVENTS) {
+    pendingEvents.shift();
+  }
+  schedulePendingFlush();
+}
+
+function schedulePendingFlush(): void {
+  if (pendingFlushTimer !== null) return;
+  if (pendingFlushAttempts >= PENDING_FLUSH_ATTEMPTS) return;
+  pendingFlushTimer = setTimeout(() => {
+    pendingFlushTimer = null;
+    flushPendingEvents();
+  }, PENDING_FLUSH_INTERVAL_MS);
+}
+
+/**
+ * Replays queued events through Plausible, if it has become available.
+ *
+ * Returns `true` when the queue was drained. Stops at the first failure so
+ * ordering is preserved and a provider that throws mid-replay cannot cause
+ * the remaining events to be silently reordered.
+ */
+function flushPendingEvents(): boolean {
+  if (typeof window === 'undefined') return false;
+  const plausible = window.plausible;
+  if (typeof plausible !== 'function' || pendingEvents.length === 0) return false;
+
+  while (pendingEvents.length > 0) {
+    const next = pendingEvents[0] as PendingEvent;
+    try {
+      plausible(next.event, { props: next.payload });
+    } catch {
+      return false;
+    }
+    pendingEvents.shift();
+  }
+
+  pendingFlushAttempts = 0;
+  return true;
+}
+
+// ─── Payload verification (§3.1 shape check) ──────────────────────────────────
+
+/**
+ * Base-payload fields that must be present on every event, with the value
+ * type §3.1 specifies. Used by the local verification mode below so a
+ * malformed payload is caught at the point it is created rather than by a
+ * dashboard months later.
+ */
+const REQUIRED_BASE_FIELDS: Record<string, 'string' | 'number' | 'boolean'> = {
+  journey: 'string',
+  timestamp: 'string',
+  network: 'string',
+  platform: 'string',
+  app_version: 'string',
+  user_agent: 'string',
+  device_type: 'string',
+  referrer: 'string',
+  anonymous_id: 'string',
+  session_id: 'string',
+  message_id: 'string',
+};
+
+/**
+ * Checks a payload against §3.1 and returns the problems found, empty when
+ * the payload is well-formed. Pure: it never throws, so it is safe to call
+ * from the dispatch path.
+ */
+export function validatePayload(payload: EventProps): string[] {
+  const problems: string[] = [];
+
+  for (const [field, expected] of Object.entries(REQUIRED_BASE_FIELDS)) {
+    const value = payload[field];
+    if (value === undefined) {
+      problems.push(`missing §3.1 field "${field}"`);
+      continue;
+    }
+    // `referrer` is legitimately `null` when there is no referring page,
+    // which the spec documents as its own value rather than an absence.
+    if (field === 'referrer' && value === null) continue;
+    if (typeof value !== expected) {
+      problems.push(`field "${field}" should be ${expected}, got ${typeof value}`);
+    }
+  }
+
+  const timestamp = payload['timestamp'];
+  if (typeof timestamp === 'string' && Number.isNaN(Date.parse(timestamp))) {
+    problems.push('field "timestamp" is not an ISO 8601 date string');
+  }
+  if (!Object.values(JOURNEYS).includes(payload['journey'] as Journey)) {
+    problems.push(`field "journey" is not one of ${Object.values(JOURNEYS).join(' | ')}`);
+  }
+  if (!Object.values(ANALYTICS_NETWORKS).includes(payload['network'] as AnalyticsNetwork)) {
+    problems.push(`field "network" is not one of ${Object.values(ANALYTICS_NETWORKS).join(' | ')}`);
+  }
+
+  return problems;
+}
+
+/**
+ * Local verification mode, enabled with `NEXT_PUBLIC_ANALYTICS_VERIFY=true`.
+ *
+ * Without it, a developer verifying instrumentation locally sees a
+ * `console.debug` line and has to eyeball the payload against
+ * `docs/analytics-spec.md` by hand. With it, every payload is checked
+ * against the §3.1 shape on the way out and violations are reported
+ * explicitly, so a missing `network` or a mistyped `journey` fails loudly in
+ * the browser instead of quietly skewing a dashboard.
+ */
+export function isVerificationEnabled(): boolean {
+  return process.env.NEXT_PUBLIC_ANALYTICS_VERIFY === 'true';
+}
+
+/**
+ * Whether a provider has taken responsibility for delivery. Tracked so a
+ * production build with no provider configured can say so once instead of
+ * dropping every event in total silence.
+ */
+let warnedNoProvider = false;
+
+// ─── track() ──────────────────────────────────────────────────────────────────
+
+/**
+ * Core dispatch function. Merges the §3.1 base payload (including the
+ * `journey`, `timestamp` and `network` dimensions) plus the identity fields
+ * (`anonymous_id`, `session_id`) into every event payload so every
+ * downstream event carries them without any per-call plumbing.
+ *
+ * This is the only place an event reaches a provider, so the consent gate,
+ * Do Not Track (§9.5) and deduplication (§9.4) are enforced here rather
+ * than at call sites — no emitter can forget them.
  *
  * Dispatch targets, in priority order:
  * 1. `window.plausible` — populated by the Plausible script loaded in the
  *    root layout when NEXT_PUBLIC_PLAUSIBLE_DOMAIN is configured (§9.1).
+ *    Anything queued from before the script arrived is replayed first.
  * 2. `window.posthog` — capture fallback when PostHog is wired up instead.
- * 3. Console debug output in development builds.
+ * 3. An in-memory queue, replayed once a provider appears.
+ * 4. Console output in development, with payload-shape verification when
+ *    NEXT_PUBLIC_ANALYTICS_VERIFY is enabled.
+ *
+ * Emission side (§9.2): every event is client-emitted today. The four
+ * "server-side preferred" events (`Payment Created`, `Claim Verified`,
+ * `Claim Succeeded`, `Claim Failed`) and the `Payment Confirmed` →
+ * `Payment Signed` rename are planned — with the client-context
+ * (session_id/device_type) contract — in
+ * `docs/analytics-server-vs-client-decision.md` (#845). Nothing moves until
+ * the SDK owns emission; do not dual-emit.
  */
-function track(event: ClaimEvent, props?: EventProps): void {
+function track<E extends ClaimEvent>(event: E, props: EventPayloadMap[E]): void {
   if (typeof window === 'undefined') return;
 
-  // #635 (§9.5) — first, before any payload is built. `getAnonymousId()`
-  // and `getSessionId()` below *persist* a UUID to localStorage/
-  // sessionStorage; minting one for a visitor who asked not to be tracked
-  // would itself be a privacy violation, so suppression has to happen
-  // before identifier generation, not just before the provider call.
+  // Consent gate — before anything else, and before the §9.5 DNT check,
+  // because an explicit on-site opt-out is a more specific statement of
+  // intent than a browser-level header that predates this visit.
+  if (isAnalyticsOptedOut()) return;
+
+  // #635 (§9.5) — second, still before any payload is built.
+  // `getAnonymousId()` and `getSessionId()` below *persist* a UUID to
+  // localStorage/sessionStorage; minting one for a visitor who asked not to
+  // be tracked would itself be a privacy violation, so suppression has to
+  // happen before identifier generation, not just before the provider call.
   if (isDoNotTrackEnabled()) return;
 
-  // #634 (§9.4) — second, so a suppressed duplicate also avoids burning a
+  // Narrow at the call boundary only; inside, the payload is the open §3.1
+  // record that gets merged with the base payload (#854).
+  const eventProps = props as EventProps;
+
+  // #634 (§9.4) — third, so a suppressed duplicate also avoids burning a
   // `message_id`.
-  if (isDuplicateClaimEvent(event, props?.claim_id)) return;
+  if (isDuplicateClaimEvent(event, eventProps.claim_id)) return;
+
+  // §3.1 `journey` is resolved from the emitter's props so it is populated
+  // centrally rather than trusted as a free-form string, then the emitter's
+  // own value is applied on top — same value, but the base payload is never
+  // missing the field.
+  const journey = normalizeJourney(eventProps.journey);
 
   // Base payload is merged in first so event-specific props can override.
   const payload: EventProps = {
-    ...buildBasePayload(),
+    ...buildBasePayload(journey),
     anonymous_id: getAnonymousId(),
     session_id: getSessionId(),
-    ...props,
+    ...eventProps,
+    journey,
     // §9.4: a per-event UUID for the analytics pipeline to deduplicate on.
     // Applied after `...props` so no call site can override or blank it.
     message_id: generateUUID(),
   };
 
-  // Plausible custom event API
-  const plausible = (window as unknown as { plausible?: Function }).plausible;
+  if (isVerificationEnabled()) {
+    const problems = validatePayload(payload);
+    if (problems.length > 0) {
+      console.warn(
+        `[analytics] payload for "${event}" does not match docs/analytics-spec.md §3.1:`,
+        problems,
+      );
+    }
+  }
+
+  // Plausible custom event API. Flushing first means an event queued
+  // during page load is delivered before the event being tracked now, which
+  // keeps funnel ordering intact.
+  const plausible = window.plausible;
   if (typeof plausible === 'function') {
+    flushPendingEvents();
     plausible(event, { props: payload });
     return;
   }
 
   // PostHog capture fallback (§9.1 self-hosted option).
-  const posthog = (window as unknown as { posthog?: { capture?: Function } }).posthog;
+  const posthog = window.posthog;
   if (typeof posthog?.capture === 'function') {
+    clearPendingEvents();
     posthog.capture(event, payload);
     return;
   }
 
-  // Fallback: console in development
+  // No provider yet. Queue rather than drop: page-load events routinely
+  // race the third-party script, and `Page Viewed` is the first entry in
+  // the Sender Activation Funnel (§7.1).
+  queuePendingEvent(event, payload);
+
   if (process.env.NODE_ENV !== 'production') {
     console.debug('[analytics]', event, payload);
+    return;
   }
-}
 
-/**
- * Reads the `Do Not Track` browser preference (§9.5). Accepts an explicit
- * header value for testability; checks `navigator.doNotTrack`,
- * `window.doNotTrack`, and the legacy `msDoNotTrack` prefixes.
- */
-export function isDntEnabled(header?: string): boolean {
-  if (header === '1') return true;
-  if (typeof navigator === 'undefined') return false;
-  const nav = navigator as Navigator & { msDoNotTrack?: string };
-  const win = typeof window !== 'undefined' ? (window as unknown as { doNotTrack?: string }) : {};
-  const raw = nav.doNotTrack ?? win.doNotTrack ?? nav.msDoNotTrack ?? '0';
-  return raw === '1' || raw === 'yes';
+  if (!warnedNoProvider) {
+    warnedNoProvider = true;
+    console.warn(
+      '[analytics] no analytics provider is configured, so events are buffered in memory and discarded. Set NEXT_PUBLIC_PLAUSIBLE_DOMAIN (§9.1).',
+    );
+  }
 }
 
 export type ShareMethod = 'sms' | 'email' | 'whatsapp' | 'qr_code';
@@ -529,17 +881,35 @@ function assetProps(assetType?: string | null, usdEquiv?: number | null): EventP
 }
 
 export const conditional = {
-  claimId: (claimId: string): EventProps => ({ claim_id: claimId }),
-  assetType: (assetType: string): EventProps => ({
+  // Return types are inferred rather than annotated as EventProps. Spreading an
+  // index-signature type into an object literal erases the known keys from the
+  // literal's inferred type, which defeats the per-event payload map (#854).
+  // #936's normalizeAssetType() is applied inside assetType so the emitted
+  // `asset_type` is the canonical code rather than the raw token.
+  claimId: (claimId: string) => ({ claim_id: claimId }),
+  assetType: (assetType: string) => ({
     asset_type: normalizeAssetType(assetType) ?? assetType,
   }),
-  amountUsdEquiv: (amountUsdEquiv: number): EventProps => ({
+  amountUsdEquiv: (amountUsdEquiv: number) => ({
     amount_usd_equiv: amountUsdEquiv,
   }),
-  expiryDays: (expiryDays: ExpiryDays): EventProps => ({ expiry_days: expiryDays }),
-  errorType: (errorType: ErrorType): EventProps => ({ error_type: errorType }),
-  errorCode: (errorCode: string): EventProps => ({ error_code: errorCode }),
+  expiryDays: (expiryDays: ExpiryDays | number) => ({ expiry_days: expiryDays }),
+  errorType: <T extends ErrorType | string>(errorType: T) => ({ error_type: errorType }),
+  errorCode: (errorCode: string) => ({ error_code: errorCode }),
 };
+
+export type SendFormFieldName =
+  | 'amount'
+  | 'asset'
+  | 'expiration'
+  | 'recipient_name'
+  | 'message';
+
+export interface SendFormFieldChangedProps {
+  fieldName: SendFormFieldName;
+  assetType?: string;
+  expiryDays?: ExpiryDays | number;
+}
 
 interface ClaimVerifiedProps {
   claimId: string;
@@ -558,7 +928,7 @@ interface ClaimCtaClickedProps {
 }
 
 interface ErrorDisplayedProps {
-  journey: 'sender' | 'recipient' | 'shared';
+  journey: Journey;
   /** Claim ID if available; omitted otherwise. */
   claimId?: string | null;
   errorType: ErrorType;
@@ -569,7 +939,7 @@ interface ErrorDisplayedProps {
 }
 
 interface RetryClickedProps {
-  journey: 'sender' | 'recipient' | 'shared';
+  journey: Journey;
   /** Claim ID if available; omitted otherwise. */
   claimId?: string | null;
   /** Error type that triggered the retry prompt. */
@@ -626,12 +996,32 @@ interface SenderSignupCtaClickedProps {
 export type ExplorerSourceScreen = 'claim_success' | 'payment_details';
 
 /** §2.3 journey values for Explorer Link Clicked. */
-export type ExplorerJourney = 'sender' | 'recipient';
+export type ExplorerJourney = Exclude<Journey, 'shared'>;
+
+/**
+ * §5.4 `explorer` values — the block explorer the clicked link opened.
+ * Closed set; see `docs/analytics-spec.md` §5.4.
+ */
+export type ExplorerName = 'stellar_expert' | 'stellar_chain';
+
+/** §5.4 `network` values for the explorer URL (testnet and mainnet explorers differ). */
+export type ExplorerNetwork = 'testnet' | 'mainnet';
 
 interface ExplorerLinkClickedProps {
   journey: ExplorerJourney;
   claimId: string;
   sourceScreen: ExplorerSourceScreen;
+  /**
+   * §5.4 `tx_hash` — the on-chain transaction hash from the link's URL, so a
+   * click can be correlated with the actual Stellar transaction. Omitted when
+   * the link target has no transaction hash; never parsed from an unvalidated
+   * URL segment.
+   */
+  txHash?: string;
+  /** §5.4 `explorer` — which block explorer was opened. */
+  explorer?: ExplorerName;
+  /** §5.4 `network` — the network the explorer URL targets. */
+  network?: ExplorerNetwork;
 }
 
 /** Client-side address-validation failure reasons (`docs/analytics-spec.md` §5.2). */
@@ -655,41 +1045,157 @@ interface ClaimSucceededProps {
   entryChannel?: string;
 }
 
+/**
+ * §4.5 `recovery_method` values for the recovery information events. Closed
+ * set — see `docs/analytics-spec.md` §4.5.
+ */
+export type RecoveryMethod = 'reclaim_expired' | 'reclaim_cancelled' | 'self_custody_backup';
+
+/**
+ * §4.5 `copy_target` values for `Recovery Information Copied`. Records *what*
+ * was copied, never its value.
+ */
+export type RecoveryCopyTarget = 'claim_link' | 'recovery_address' | 'wallet_secret';
+
+interface RecoveryInformationViewedProps {
+  claimId: string;
+  recoveryMethod: RecoveryMethod;
+}
+
+interface RecoveryInformationCopiedProps {
+  claimId: string;
+  recoveryMethod: RecoveryMethod;
+  copyTarget: RecoveryCopyTarget;
+}
+
 export function daysRemainingUntil(iso: string): number | undefined {
   const expiresAt = Date.parse(iso);
   if (Number.isNaN(expiresAt)) return undefined;
   return Math.max(0, Math.ceil((expiresAt - Date.now()) / 86_400_000));
 }
 
+// ─── §3.2 Per-event payload map (#854) ────────────────────────────────────────
+
+/**
+ * Exact wire payload (snake_case keys, i.e. what `track()` receives after the
+ * camelCase emitter params are converted) for each `ClaimEvent`. Mirrors
+ * `mobile/app/src/analytics/analytics.ts`'s `AnalyticsEvent` union.
+ *
+ * `journey` is optional everywhere: `track()` normalizes it centrally via
+ * `normalizeJourney()`, so no emitter is required to repeat it.
+ * Shapes for events with no emitter yet are taken from their §4–§6 tables;
+ * the first real emitter may tighten them.
+ */
+type SendFormField = 'amount' | 'asset' | 'recipient_name' | 'message' | 'expiration';
+type WalletProviderPath = 'freighter' | 'lobstr' | 'generated';
+type DashboardFilter = 'all' | 'unclaimed' | 'claimed' | 'expired';
+
+type EventPayloadShapes = {
+  'Page Viewed': { page: string; entry_source?: EntrySource; journey?: Journey };
+  'Send Form Viewed': { journey?: Journey };
+  'Send Form Started': { journey?: Journey; first_field: SendFormField };
+  'Send Form Field Changed': { journey?: Journey; field_name: SendFormField; asset_type?: string; expiry_days?: number | null };
+  'Send Form Completed': { journey?: Journey; asset_type?: string; expiry_days?: number | null; has_recipient_name: boolean; has_message: boolean };
+  'Payment Confirmation Viewed': { journey?: Journey; asset_type?: string; expiry_days?: number | null };
+  'Wallet Connected': { journey?: Journey; wallet_type?: string; wallet_provider: WalletProviderPath };
+  'Wallet Connection Failed': { journey?: Journey; wallet_type?: string; wallet_provider?: WalletProviderPath; error_code?: string };
+  'Payment Confirmed': { journey?: Journey; asset_type?: string; expiry_days?: number | null; wallet_type?: string };
+  'Payment Created': { journey?: Journey; claim_id: string; asset_type?: string; expiry_days?: number | null; confirmation_time_ms: number };
+  'Payment Creation Failed': { journey?: Journey; asset_type?: string; error_code?: string };
+  'Payment Success Viewed': { journey?: Journey; claim_id: string; asset_type?: string };
+  'Claim Link Copied': { journey?: Journey; claim_id: string; copy_location: 'success_screen' | 'dashboard_detail' };
+  'Claim Link Shared': { journey?: Journey; claim_id: string; share_method: ShareMethod };
+  'Dashboard Viewed': { journey?: Journey; total_payments: number; active_filter: DashboardFilter };
+  'Dashboard Filter Applied': { journey?: Journey; filter: DashboardFilter };
+  'Payment Details Viewed': { journey?: Journey; claim_id: string; claim_status: PaymentClaimStatus };
+  'Payment Cancelled': { journey?: Journey; claim_id: string; asset_type?: string; time_since_creation_hours: number };
+  'Funds Reclaimed': { journey?: Journey; claim_id: string; asset_type?: string; reclaim_reason: 'expired' | 'cancelled'; days_expired?: number };
+  'Recovery Information Viewed': { journey?: Journey; claim_id: string; recovery_method: RecoveryMethod };
+  'Recovery Information Copied': { journey?: Journey; claim_id: string; recovery_method: RecoveryMethod; copy_target: RecoveryCopyTarget };
+  'Claim Page Opened': { journey?: Journey; claim_id: string; entry_channel: ClaimEntryChannel; is_returning_visit?: boolean };
+  'Claim Verified': { journey?: Journey; claim_id: string; asset_type?: string; expiry_days_remaining?: number; verification_time_ms: number };
+  'Claim CTA Clicked': { journey?: Journey; claim_id: string; asset_type?: string };
+  'Wallet Address Screen Viewed': { journey?: Journey; claim_id: string; has_previous_address: boolean };
+  'Wallet Address Entered': { journey?: Journey; claim_id: string; used_previous_address: boolean };
+  'Wallet Address Validation Failed': { journey?: Journey; claim_id?: string; validation_error: ValidationError; attempt_number: number };
+  'Claim Confirmation Viewed': { journey?: Journey; claim_id: string; asset_type?: string };
+  'Claim Submitted': { journey?: Journey; claim_id: string; asset_type?: string };
+  'Claim Succeeded': { journey?: Journey; claim_id: string; asset_type?: string; time_to_claim_hours?: number; sweep_duration_ms?: number; entry_channel?: string };
+  'Claim Failed': { journey?: Journey; claim_id: string; asset_type?: string; error_code?: string; error_type: ClaimFailedErrorType; attempt_number: number };
+  'Claim Success Viewed': { journey?: Journey; claim_id: string; asset_type?: string };
+  'Sender Signup CTA Clicked': { journey?: Journey; claim_id: string; source: 'claim_success_screen' };
+  'Explorer Link Clicked': { journey?: ExplorerJourney; claim_id: string; source_screen: ExplorerSourceScreen; tx_hash?: string; explorer?: ExplorerName; network?: ExplorerNetwork };
+  'Error Displayed': { journey?: Journey; claim_id?: string | null; error_type: ErrorType; error_code?: string; source_screen: string };
+  'Retry Clicked': { journey?: Journey; claim_id?: string | null; error_type: ErrorType; attempt_number: number };
+};
+
+/**
+ * `ClaimEvent` → payload, enforced in both directions by construction:
+ *  - a `ClaimEvent` with no shape above maps to `never` (every payload for it
+ *    is a compile error until the shape is written);
+ *  - a shape key that is not a `ClaimEvent` (typo) collapses the whole map to
+ *    `{ [E in ClaimEvent]: never }`, so *every* `track()` call fails.
+ * The `type ClaimEvent` union above stays the single source of truth (CI's
+ * analytics-spec-diff.yml parses it textually).
+ */
+type EventPayloadMap = [Exclude<keyof EventPayloadShapes, ClaimEvent>] extends [never]
+  ? { [E in ClaimEvent]: E extends keyof EventPayloadShapes ? EventPayloadShapes[E] : never }
+  : { [E in ClaimEvent]: never };
+
 // ─── Public analytics surface ─────────────────────────────────────────────────
 
 export const analytics = {
+  /**
+   * Legacy aliases (#849) predating the spec-aligned methods further down
+   * (`claimPageOpened`, `claimCtaClicked`, `claimSucceeded`, `claimFailed`),
+   * which are what the claim page, claim status card, send flow and error
+   * boundaries actually call. These emit the same Title Case §5 events, so
+   * nothing is instrumented differently; they are retained because tests
+   * assert against them. New call sites should use the spec-aligned method.
+   */
   claimPageViewed: ({ claimId, entryChannel }: { claimId: string; entryChannel: ClaimEntryChannel }) =>
     track('Claim Page Opened', {
       journey: 'recipient',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       entry_channel: entryChannel,
     }),
   claimInitiated: ({ claimId, assetType, amountUsdEquiv }: { claimId: string; assetType?: string; amountUsdEquiv?: number }) =>
     track('Claim CTA Clicked', {
       journey: 'recipient',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       ...assetProps(assetType, amountUsdEquiv),
     }),
   claimSuccess: ({ claimId, assetType, amountUsdEquiv }: { claimId: string; assetType?: string; amountUsdEquiv?: number }) =>
     track('Claim Succeeded', {
       journey: 'recipient',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       ...assetProps(assetType, amountUsdEquiv),
     }),
   claimError: ({ claimId, assetType, amountUsdEquiv, errorCode = 'unknown', errorType, attemptNumber }: ClaimFailedProps) =>
     track('Claim Failed', {
       journey: 'recipient',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       ...assetProps(assetType, amountUsdEquiv),
-      error_code: errorCode,
-      error_type: errorType,
+      ...conditional.errorCode(errorCode),
+      ...conditional.errorType(errorType),
       attempt_number: attemptNumber,
+    }),
+  /**
+   * §4.2 Send Form Field Changed — fires when the sender changes a field value
+   * and moves focus away (blur). Not fired on every keystroke.
+   */
+  sendFormFieldChanged: ({
+    fieldName,
+    assetType,
+    expiryDays,
+  }: SendFormFieldChangedProps) =>
+    track('Send Form Field Changed', {
+      journey: 'sender',
+      field_name: fieldName,
+      ...(fieldName === 'asset' && assetType ? conditional.assetType(assetType) : {}),
+      ...(fieldName === 'expiration' && expiryDays !== undefined
+        ? conditional.expiryDays(expiryDays)
+        : {}),
     }),
   sendFormCompleted: ({
     assetType,
@@ -707,7 +1213,7 @@ export const analytics = {
     track('Send Form Completed', {
       journey: 'sender',
       ...assetProps(assetType, amountUsdEquiv),
-      ...(expiryDays != null ? { expiry_days: expiryDays } : {}),
+      ...(expiryDays !== undefined ? conditional.expiryDays(expiryDays) : {}),
       has_recipient_name: hasRecipientName,
       has_message: hasMessage,
     }),
@@ -723,7 +1229,15 @@ export const analytics = {
     track('Payment Confirmation Viewed', {
       journey: 'sender',
       ...assetProps(assetType, amountUsdEquiv),
-      ...(expiryDays != null ? { expiry_days: expiryDays } : {}),
+      ...(expiryDays !== undefined ? conditional.expiryDays(expiryDays) : {}),
+    }),
+  /**
+   * §4.3 Wallet Connection Failed - fires when wallet connection is attempted but fails.
+   */
+  walletConnectionFailed: ({ errorCode = 'unknown' }: { errorCode?: string } = {}) =>
+    track('Wallet Connection Failed', {
+      journey: 'sender',
+      ...conditional.errorCode(errorCode),
     }),
   paymentConfirmed: ({
     assetType,
@@ -739,7 +1253,7 @@ export const analytics = {
     track('Payment Confirmed', {
       journey: 'sender',
       ...assetProps(assetType, amountUsdEquiv),
-      ...(expiryDays != null ? { expiry_days: expiryDays } : {}),
+      ...(expiryDays !== undefined ? conditional.expiryDays(expiryDays) : {}),
       ...(walletType ? { wallet_type: walletType } : {}),
     }),
   paymentCreated: ({
@@ -757,10 +1271,25 @@ export const analytics = {
   }) =>
     track('Payment Created', {
       journey: 'sender',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       ...assetProps(assetType, amountUsdEquiv),
-      ...(expiryDays != null ? { expiry_days: expiryDays } : {}),
+      ...(expiryDays !== undefined ? conditional.expiryDays(expiryDays) : {}),
       confirmation_time_ms: confirmationTimeMs,
+    }),
+  /**
+   * §4.4 Payment Creation Failed — fires when payment creation transaction fails.
+   */
+  paymentCreationFailed: ({
+    errorCode = 'unknown',
+    assetType,
+  }: {
+    errorCode?: string;
+    assetType?: string;
+  } = {}) =>
+    track('Payment Creation Failed', {
+      journey: 'sender',
+      ...conditional.errorCode(errorCode),
+      ...(assetType ? conditional.assetType(assetType) : {}),
     }),
   claimLinkCopied: ({
     claimId,
@@ -771,13 +1300,13 @@ export const analytics = {
   }) =>
     track('Claim Link Copied', {
       journey: 'sender',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       copy_location: copyLocation,
     }),
   claimLinkShared: ({ claimId, shareMethod }: { claimId: string; shareMethod: ShareMethod }) =>
     track('Claim Link Shared', {
       journey: 'sender',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       share_method: shareMethod,
     }),
   claimPageOpened: ({
@@ -789,7 +1318,7 @@ export const analytics = {
   }) =>
     track('Claim Page Opened', {
       journey: 'recipient',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       entry_channel: entryChannel,
     }),
   paymentDetailsViewed: ({
@@ -801,7 +1330,7 @@ export const analytics = {
   }) =>
     track('Payment Details Viewed', {
       journey: 'sender',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       claim_status: claimStatus,
     }),
   pageViewed: ({ page, entrySource }: { page: string; entrySource?: EntrySource }) =>
@@ -840,7 +1369,7 @@ export const analytics = {
   }: ErrorDisplayedProps) =>
     track('Error Displayed', {
       journey,
-      ...(claimId ? { claim_id: claimId } : {}),
+      ...(claimId ? conditional.claimId(claimId) : {}),
       ...conditional.errorType(errorType),
       ...conditional.errorCode(errorCode ?? 'unknown'),
       source_screen: sourceScreen,
@@ -852,14 +1381,14 @@ export const analytics = {
   }: WalletAddressValidationFailedProps) =>
     track('Wallet Address Validation Failed', {
       journey: 'recipient',
-      ...(claimId ? { claim_id: claimId } : {}),
+      ...(claimId ? conditional.claimId(claimId) : {}),
       validation_error: validationError,
       attempt_number: attemptNumber,
     }),
   claimConfirmationViewed: ({ claimId, assetType, amountUsdEquiv }: ClaimCtaClickedProps) =>
     track('Claim Confirmation Viewed', {
       journey: 'recipient',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       ...assetProps(assetType, amountUsdEquiv),
     }),
 
@@ -876,8 +1405,8 @@ export const analytics = {
   }: RetryClickedProps) =>
     track('Retry Clicked', {
       journey,
-      ...(claimId != null ? { claim_id: claimId } : {}),
-      error_type: errorType,
+      ...(claimId != null ? conditional.claimId(claimId) : {}),
+      ...conditional.errorType(errorType),
       attempt_number: attemptNumber,
     }),
 
@@ -895,10 +1424,10 @@ export const analytics = {
   }: ClaimFailedProps) =>
     track('Claim Failed', {
       journey: 'recipient',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       ...assetProps(assetType, amountUsdEquiv),
-      error_code: errorCode,
-      error_type: errorType,
+      ...conditional.errorCode(errorCode),
+      ...conditional.errorType(errorType),
       attempt_number: attemptNumber,
     }),
 
@@ -908,7 +1437,7 @@ export const analytics = {
   claimSuccessViewed: ({ claimId, assetType, amountUsdEquiv }: ClaimSuccessViewedProps) =>
     track('Claim Success Viewed', {
       journey: 'recipient',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       ...assetProps(assetType, amountUsdEquiv),
     }),
 
@@ -919,7 +1448,7 @@ export const analytics = {
   senderSignupCtaClicked: ({ claimId }: SenderSignupCtaClickedProps) =>
     track('Sender Signup CTA Clicked', {
       journey: 'recipient',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       source: 'claim_success_screen',
     }),
 
@@ -927,16 +1456,26 @@ export const analytics = {
    * §5.4/§6 Explorer Link Clicked — fires when a user (sender or recipient) clicks a
    * Stellar Explorer transaction link.
    */
-  explorerLinkClicked: ({ journey, claimId, sourceScreen }: ExplorerLinkClickedProps) =>
+  explorerLinkClicked: ({
+    journey,
+    claimId,
+    sourceScreen,
+    txHash,
+    explorer,
+    network,
+  }: ExplorerLinkClickedProps) =>
     track('Explorer Link Clicked', {
       journey,
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       source_screen: sourceScreen,
+      ...(txHash ? { tx_hash: txHash } : {}),
+      ...(explorer ? { explorer } : {}),
+      ...(network ? { network } : {}),
     }),
   claimSubmitted: ({ claimId, assetType, amountUsdEquiv }: ClaimCtaClickedProps) =>
     track('Claim Submitted', {
       journey: 'recipient',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       ...assetProps(assetType, amountUsdEquiv),
     }),
   claimSucceeded: ({
@@ -949,10 +1488,39 @@ export const analytics = {
   }: ClaimSucceededProps) =>
     track('Claim Succeeded', {
       journey: 'recipient',
-      claim_id: claimId,
+      ...conditional.claimId(claimId),
       ...assetProps(assetType, amountUsdEquiv),
       ...(timeToClaimHours !== undefined ? { time_to_claim_hours: timeToClaimHours } : {}),
       ...(sweepDurationMs !== undefined ? { sweep_duration_ms: sweepDurationMs } : {}),
       entry_channel: entryChannel,
+    }),
+
+  /**
+   * §4.5 Recovery Information Viewed — fires when a sender opens the surface
+   * that shows their recovery information (reclaim instructions or a
+   * self-custody backup). The recovery material itself is never in the payload.
+   */
+  recoveryInformationViewed: ({ claimId, recoveryMethod }: RecoveryInformationViewedProps) =>
+    track('Recovery Information Viewed', {
+      journey: 'sender',
+      claim_id: claimId,
+      recovery_method: recoveryMethod,
+    }),
+
+  /**
+   * §4.5 Recovery Information Copied — fires when a sender copies recovery
+   * information to the clipboard. `copy_target` records what was copied, never
+   * its value.
+   */
+  recoveryInformationCopied: ({
+    claimId,
+    recoveryMethod,
+    copyTarget,
+  }: RecoveryInformationCopiedProps) =>
+    track('Recovery Information Copied', {
+      journey: 'sender',
+      claim_id: claimId,
+      recovery_method: recoveryMethod,
+      copy_target: copyTarget,
     }),
 };

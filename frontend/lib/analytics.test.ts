@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   analytics,
+  ANALYTICS_NETWORKS,
   appVersion,
   buildBasePayload,
   CLAIM_FAILED_ERROR_TYPES,
+  clearPendingEvents,
   conditional,
   createDeduplicationStore,
+  currentNetwork,
   daysRemainingUntil,
   DEDUP_MAX_ENTRIES,
   DEDUP_TTL_MS,
@@ -16,13 +19,24 @@ import {
   ErrorType,
   getAnonymousId,
   getSessionId,
+  isAnalyticsOptedOut,
   isDoNotTrackEnabled,
+  isVerificationEnabled,
+  JOURNEYS,
+  normalizeJourney,
   normalizeAssetType,
+  PENDING_QUEUE_MAX_EVENTS,
+  pendingEventCount,
+  PLATFORM,
+  PLATFORMS,
+  setAnalyticsOptedOut,
+  toAmountUsdEquiv,
   type ClaimFailedErrorType,
   type ExplorerJourney,
   type ExplorerSourceScreen,
-  toAmountUsdEquiv,
+  type SendFormFieldName,
   VALID_EXPIRY_WINDOWS,
+  validatePayload,
   type ValidationError,
 } from '@/lib/analytics';
 
@@ -205,6 +219,191 @@ describe('conditional props wired into emitted events', () => {
     expect(call[1].props).toEqual(
       expect.objectContaining({ journey: 'recipient', claim_id: 'tok_abc', asset_type: 'XLM' }),
     );
+  });
+});
+
+describe('analytics.sendFormFieldChanged (§4.2 / #774)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    delete (window as unknown as { plausible?: unknown }).plausible;
+  });
+
+  const mockPlausible = () =>
+    ((window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible =
+      plausibleMock());
+
+  const latest = () =>
+    (window as unknown as { plausible: ReturnType<typeof plausibleMock> }).plausible.mock
+      .calls[0]!;
+
+  it.each(['amount', 'recipient_name', 'message'] as SendFormFieldName[])(
+    'emits Send Form Field Changed with field_name=%s and journey=sender',
+    (fieldName) => {
+      mockPlausible();
+      analytics.sendFormFieldChanged({ fieldName });
+
+      const call = latest();
+      expect(call[0]).toBe('Send Form Field Changed');
+      expect(call[1].props).toEqual(
+        expect.objectContaining({ journey: 'sender', field_name: fieldName }),
+      );
+    },
+  );
+
+  it('attaches asset_type when field is "asset" and assetType is provided', () => {
+    mockPlausible();
+    analytics.sendFormFieldChanged({ fieldName: 'asset', assetType: 'USDC' });
+    expect(latest()[1].props).toEqual(
+      expect.objectContaining({ field_name: 'asset', asset_type: 'USDC' }),
+    );
+  });
+
+  it('omits asset_type when field is "asset" but no assetType is given', () => {
+    mockPlausible();
+    analytics.sendFormFieldChanged({ fieldName: 'asset' });
+    const props = latest()[1].props as Record<string, unknown>;
+    expect(props.field_name).toBe('asset');
+    expect('asset_type' in props).toBe(false);
+  });
+
+  it('attaches expiry_days when field is "expiration"', () => {
+    mockPlausible();
+    analytics.sendFormFieldChanged({ fieldName: 'expiration', expiryDays: 7 });
+    expect(latest()[1].props).toEqual(
+      expect.objectContaining({ field_name: 'expiration', expiry_days: 7 }),
+    );
+  });
+
+  it('attaches expiry_days: null when field is "expiration" and expiryDays is null', () => {
+    mockPlausible();
+    analytics.sendFormFieldChanged({ fieldName: 'expiration', expiryDays: null });
+    const props = latest()[1].props as Record<string, unknown>;
+    expect(props.field_name).toBe('expiration');
+    expect(props).toHaveProperty('expiry_days', null);
+  });
+
+  it('omits expiry_days when field is not "expiration"', () => {
+    mockPlausible();
+    analytics.sendFormFieldChanged({ fieldName: 'amount' });
+    const props = latest()[1].props as Record<string, unknown>;
+    expect('expiry_days' in props).toBe(false);
+  });
+});
+
+describe('expiry_days null serialisation (§3.2 / #818)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    delete (window as unknown as { plausible?: unknown }).plausible;
+  });
+
+  const mockPlausible = () =>
+    ((window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible =
+      plausibleMock());
+
+  const propsOf = () =>
+    (window as unknown as { plausible: ReturnType<typeof plausibleMock> }).plausible.mock
+      .calls[0]![1].props as Record<string, unknown>;
+
+  it('sendFormCompleted serialises expiry_days: null correctly', () => {
+    mockPlausible();
+    analytics.sendFormCompleted({ expiryDays: null, hasRecipientName: true, hasMessage: false });
+    expect(propsOf()).toHaveProperty('expiry_days', null);
+  });
+
+  it('paymentConfirmationViewed serialises expiry_days: null correctly', () => {
+    mockPlausible();
+    analytics.paymentConfirmationViewed({ expiryDays: null });
+    expect(propsOf()).toHaveProperty('expiry_days', null);
+  });
+
+  it('paymentConfirmed serialises expiry_days: null correctly', () => {
+    mockPlausible();
+    analytics.paymentConfirmed({ walletType: 'Freighter', expiryDays: null });
+    expect(propsOf()).toHaveProperty('expiry_days', null);
+  });
+
+  it('paymentCreated serialises expiry_days: null correctly', () => {
+    mockPlausible();
+    analytics.paymentCreated({ claimId: 'tok_null_expiry', confirmationTimeMs: 100, expiryDays: null });
+    expect(propsOf()).toHaveProperty('expiry_days', null);
+  });
+
+  it('sendFormCompleted omits expiry_days when the param is not provided', () => {
+    mockPlausible();
+    analytics.sendFormCompleted({ hasRecipientName: false, hasMessage: false });
+    expect('expiry_days' in propsOf()).toBe(false);
+  });
+});
+
+describe('analytics.walletConnectionFailed (§4.3 / #819)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    delete (window as unknown as { plausible?: unknown }).plausible;
+  });
+
+  const mockPlausible = () =>
+    ((window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible =
+      plausibleMock());
+
+  const latest = () =>
+    (window as unknown as { plausible: ReturnType<typeof plausibleMock> }).plausible.mock
+      .calls[0]!;
+
+  it('emits Wallet Connection Failed with error_code and journey=sender', () => {
+    mockPlausible();
+    analytics.walletConnectionFailed({ errorCode: 'USER_REJECTED' });
+    const call = latest();
+    expect(call[0]).toBe('Wallet Connection Failed');
+    expect(call[1].props).toEqual(
+      expect.objectContaining({ journey: 'sender', error_code: 'USER_REJECTED' }),
+    );
+  });
+
+  it('defaults error_code to "unknown" when not provided', () => {
+    mockPlausible();
+    analytics.walletConnectionFailed();
+    expect(latest()[1].props).toEqual(expect.objectContaining({ error_code: 'unknown' }));
+  });
+});
+
+describe('analytics.paymentCreationFailed (§4.4 / #819)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    delete (window as unknown as { plausible?: unknown }).plausible;
+  });
+
+  const mockPlausible = () =>
+    ((window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible =
+      plausibleMock());
+
+  const latest = () =>
+    (window as unknown as { plausible: ReturnType<typeof plausibleMock> }).plausible.mock
+      .calls[0]!;
+
+  it('emits Payment Creation Failed with error_code and journey=sender', () => {
+    mockPlausible();
+    analytics.paymentCreationFailed({ errorCode: 'TX_FAILED' });
+    const call = latest();
+    expect(call[0]).toBe('Payment Creation Failed');
+    expect(call[1].props).toEqual(
+      expect.objectContaining({ journey: 'sender', error_code: 'TX_FAILED' }),
+    );
+  });
+
+  it('attaches asset_type when provided', () => {
+    mockPlausible();
+    analytics.paymentCreationFailed({ errorCode: 'TX_FAILED', assetType: 'USDC' });
+    expect(latest()[1].props).toEqual(expect.objectContaining({ asset_type: 'USDC' }));
+  });
+
+  it('defaults error_code to "unknown" when not provided', () => {
+    mockPlausible();
+    analytics.paymentCreationFailed();
+    expect(latest()[1].props).toEqual(expect.objectContaining({ error_code: 'unknown' }));
   });
 });
 
@@ -916,6 +1115,97 @@ describe('post-claim events (§5.3–§5.4)', () => {
         expect(props.source_screen).toBe(sourceScreen);
       },
     );
+
+    it('carries tx_hash, explorer, and network when provided (§5.4)', () => {
+      mockPlausible();
+      analytics.explorerLinkClicked({
+        journey: 'recipient',
+        claimId: 'claim-011',
+        sourceScreen: 'claim_success',
+        txHash: 'abc123',
+        explorer: 'stellar_expert',
+        network: 'testnet',
+      });
+
+      const props = latest()[1].props as Record<string, unknown>;
+      expect(props.tx_hash).toBe('abc123');
+      expect(props.explorer).toBe('stellar_expert');
+      expect(props.network).toBe('testnet');
+    });
+
+    it('omits tx_hash, explorer, and network when not provided (§5.4)', () => {
+      mockPlausible();
+      analytics.explorerLinkClicked({
+        journey: 'sender',
+        claimId: 'claim-012',
+        sourceScreen: 'payment_details',
+      });
+
+      const props = latest()[1].props as Record<string, unknown>;
+      expect('tx_hash' in props).toBe(false);
+      expect('explorer' in props).toBe(false);
+      expect('network' in props).toBe(false);
+    });
+  });
+
+  describe('analytics recovery information events (§4.5)', () => {
+    it('emits Recovery Information Viewed with journey, claim_id, and recovery_method', () => {
+      mockPlausible();
+      analytics.recoveryInformationViewed({
+        claimId: 'claim-013',
+        recoveryMethod: 'reclaim_expired',
+      });
+
+      const call = latest();
+      expect(call[0]).toBe('Recovery Information Viewed');
+      expect(call[1].props).toEqual(
+        expect.objectContaining({
+          journey: 'sender',
+          claim_id: 'claim-013',
+          recovery_method: 'reclaim_expired',
+        }),
+      );
+    });
+
+    it('emits Recovery Information Copied with recovery_method and copy_target', () => {
+      mockPlausible();
+      analytics.recoveryInformationCopied({
+        claimId: 'claim-014',
+        recoveryMethod: 'self_custody_backup',
+        copyTarget: 'wallet_secret',
+      });
+
+      const call = latest();
+      expect(call[0]).toBe('Recovery Information Copied');
+      expect(call[1].props).toEqual(
+        expect.objectContaining({
+          journey: 'sender',
+          claim_id: 'claim-014',
+          recovery_method: 'self_custody_backup',
+          copy_target: 'wallet_secret',
+        }),
+      );
+    });
+
+    it('never carries the recovery material itself (§4.5 privacy boundary)', () => {
+      mockPlausible();
+      analytics.recoveryInformationCopied({
+        claimId: 'claim-015',
+        recoveryMethod: 'reclaim_expired',
+        copyTarget: 'claim_link',
+      });
+
+      const props = latest()[1].props as Record<string, unknown>;
+      expect(props).toMatchObject({
+        journey: 'sender',
+        claim_id: 'claim-015',
+        recovery_method: 'reclaim_expired',
+        copy_target: 'claim_link',
+      });
+      // Records the copy, not what was copied.
+      expect(props).not.toHaveProperty('value');
+      expect(props).not.toHaveProperty('secret');
+    });
   });
 
   it('no-ops when the window object is unavailable', () => {
@@ -992,12 +1282,28 @@ describe('getSessionId (§3.1)', () => {
   });
 
   it('stores the id in sessionStorage under the expected key', () => {
-    getSessionId();
-    expect(sessionStorage.getItem('bridgelet_session_id')).not.toBeNull();
+    const id = getSessionId();
+    expect(sessionStorage.getItem('bridgelet_session_id')).toBe(id);
+  });
+
+  it('rotates the id after 30 minutes of inactivity (§9.3, via analytics-session)', () => {
+    const first = getSessionId();
+    const start = Date.now();
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(start + 30 * 60 * 1000 + 1000);
+      const second = getSessionId();
+      expect(second).not.toBe(first);
+      expect(second).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-/i);
+      expect(sessionStorage.getItem('bridgelet_session_id')).toBe(second);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
 describe('track() base-payload identity merge', () => {
+
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
@@ -1607,6 +1913,9 @@ describe('dispatch targets and PostHog fallback', () => {
     expect(capture).not.toHaveBeenCalled();
   });
 })
+// ─── #886 platform constant ───────────────────────────────────────────────────
+
+
 describe('detectNetwork (§3.1 network)', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
@@ -1784,4 +2093,344 @@ describe('asset_type & amount_usd_equiv on emitted events (§3.2)', () => {
       );
     }
   });
+});
+describe('PLATFORM constant', () => {
+  it('exposes "web" as the only web platform value', () => {
+    expect(PLATFORM).toBe('web');
+    expect(Object.values(PLATFORMS)).toEqual(['web']);
+  });
+
+  it('is the value buildBasePayload emits', () => {
+    expect(buildBasePayload().platform).toBe(PLATFORM);
+  });
+});
+
+// ─── #807 journey dimension ───────────────────────────────────────────────────
+
+describe('journey dimension', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    delete (window as unknown as { plausible?: unknown }).plausible;
+    clearPendingEvents();
+  });
+
+  it('defaults to "shared" when no journey is supplied', () => {
+    expect(buildBasePayload().journey).toBe(JOURNEYS.shared);
+  });
+
+  it('accepts each spec journey value', () => {
+    for (const journey of Object.values(JOURNEYS)) {
+      expect(buildBasePayload(journey).journey).toBe(journey);
+    }
+  });
+
+  it('normalizes unknown or malformed values to "shared"', () => {
+    expect(normalizeJourney(undefined)).toBe('shared');
+    expect(normalizeJourney('Sender')).toBe('shared');
+    expect(normalizeJourney(null)).toBe('shared');
+    expect(normalizeJourney('recipient')).toBe('recipient');
+  });
+
+  it('is populated on every event even when the emitter omits it', () => {
+    const plausible = plausibleMock();
+    window.plausible = plausible;
+
+    analytics.sendFormViewed();
+
+    expect(plausible).toHaveBeenCalledTimes(1);
+    expect(plausible.mock.calls[0]![1]).toEqual(expect.objectContaining({ journey: 'sender' }));
+  });
+});
+
+// ─── #808 timestamp dimension ─────────────────────────────────────────────────
+
+describe('timestamp dimension', () => {
+  it('emits an ISO 8601 send time', () => {
+    const payload = buildBasePayload();
+    expect(typeof payload.timestamp).toBe('string');
+    expect(Number.isNaN(Date.parse(payload.timestamp as string))).toBe(false);
+    expect(payload.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  });
+});
+
+// ─── #810 / #881 network dimension ────────────────────────────────────────────
+
+describe('network dimension', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('maps stellar-mainnet to mainnet', () => {
+    vi.stubEnv('NEXT_PUBLIC_CRYPTO_NETWORK', 'stellar-mainnet');
+    expect(currentNetwork()).toBe(ANALYTICS_NETWORKS.mainnet);
+  });
+
+  it('maps stellar-testnet to testnet', () => {
+    vi.stubEnv('NEXT_PUBLIC_CRYPTO_NETWORK', 'stellar-testnet');
+    expect(currentNetwork()).toBe(ANALYTICS_NETWORKS.testnet);
+  });
+
+  it('reports "unknown" rather than silently claiming testnet when unset', () => {
+    vi.stubEnv('NEXT_PUBLIC_CRYPTO_NETWORK', '');
+    expect(currentNetwork()).toBe(ANALYTICS_NETWORKS.unknown);
+  });
+
+  it('reports "unknown" for an unrecognised value', () => {
+    vi.stubEnv('NEXT_PUBLIC_CRYPTO_NETWORK', 'stellar-future-net');
+    expect(currentNetwork()).toBe(ANALYTICS_NETWORKS.unknown);
+  });
+
+  it('is present on the base payload', () => {
+    vi.stubEnv('NEXT_PUBLIC_CRYPTO_NETWORK', 'stellar-mainnet');
+    expect(buildBasePayload().network).toBe('mainnet');
+  });
+});
+
+// ─── #882 consent gate ────────────────────────────────────────────────────────
+
+describe('explicit analytics opt-out', () => {
+  afterEach(() => {
+    setAnalyticsOptedOut(false);
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    delete (window as unknown as { plausible?: unknown }).plausible;
+    clearPendingEvents();
+  });
+
+  it('defaults to allowing tracking when no decision is recorded', () => {
+    expect(isAnalyticsOptedOut()).toBe(false);
+  });
+
+  it('persists the opt-out and clears it again', () => {
+    setAnalyticsOptedOut(true);
+    expect(isAnalyticsOptedOut()).toBe(true);
+    setAnalyticsOptedOut(false);
+    expect(isAnalyticsOptedOut()).toBe(false);
+  });
+
+  it('suppresses every event once opted out', () => {
+    const plausible = plausibleMock();
+    window.plausible = plausible;
+    setAnalyticsOptedOut(true);
+
+    analytics.claimPageViewed({ claimId: 'tok_optout', entryChannel: 'direct' });
+
+    expect(plausible).not.toHaveBeenCalled();
+    expect(pendingEventCount()).toBe(0);
+  });
+
+  it('does not mint an anonymous_id for a visitor who opted out', () => {
+    window.plausible = plausibleMock();
+    setAnalyticsOptedOut(true);
+    localStorage.removeItem('bridgelet_anonymous_id');
+
+    analytics.sendFormViewed();
+
+    expect(localStorage.getItem('bridgelet_anonymous_id')).toBeNull();
+  });
+});
+
+// ─── #851 pre-provider queue ──────────────────────────────────────────────────
+
+describe('queueing events until a provider appears', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    delete (window as unknown as { plausible?: unknown }).plausible;
+    delete (window as unknown as { posthog?: unknown }).posthog;
+    clearPendingEvents();
+  });
+
+  it('buffers a page-load event when the provider has not loaded yet', () => {
+    analytics.pageViewed({ page: '/' });
+
+    expect(pendingEventCount()).toBe(1);
+  });
+
+  it('replays buffered events once Plausible appears, in order', () => {
+    analytics.pageViewed({ page: '/' });
+    analytics.sendFormViewed();
+
+    const plausible = plausibleMock();
+    window.plausible = plausible;
+    analytics.paymentConfirmationViewed({});
+
+    expect(plausible.mock.calls.map((call) => call[0])).toEqual([
+      'Page Viewed',
+      'Send Form Viewed',
+      'Payment Confirmation Viewed',
+    ]);
+    expect(pendingEventCount()).toBe(0);
+  });
+
+  it('preserves the original payload of a buffered event', () => {
+    analytics.claimPageOpened({ claimId: 'tok_queue', entryChannel: 'direct' });
+
+    const plausible = plausibleMock();
+    window.plausible = plausible;
+    analytics.sendFormViewed();
+
+    const replayed = plausible.mock.calls[0]![1] as { props: Record<string, unknown> };
+    expect(replayed.props.claim_id).toBe('tok_queue');
+    expect(replayed.props.journey).toBe('recipient');
+  });
+
+  it('bounds the queue, dropping the oldest events first', () => {
+    for (let i = 0; i < PENDING_QUEUE_MAX_EVENTS + 5; i += 1) {
+      analytics.paymentDetailsViewed({ claimId: 'claim_' + i, claimStatus: 'unclaimed' });
+    }
+
+    expect(pendingEventCount()).toBe(PENDING_QUEUE_MAX_EVENTS);
+
+    const plausible = plausibleMock();
+    window.plausible = plausible;
+    analytics.sendFormViewed();
+
+    const replayed = plausible.mock.calls.slice(0, PENDING_QUEUE_MAX_EVENTS);
+    expect(replayed[0]![1]).toEqual(expect.objectContaining({ claim_id: 'claim_5' }));
+  });
+
+  it('sends straight through once a provider is available', () => {
+    const plausible = plausibleMock();
+    window.plausible = plausible;
+
+    analytics.sendFormViewed();
+
+    expect(pendingEventCount()).toBe(0);
+    expect(plausible).toHaveBeenCalledTimes(1);
+  });
+
+  it('discards the queue when PostHog takes over instead', () => {
+    analytics.sendFormViewed();
+    const capture = vi.fn();
+    window.posthog = { capture };
+
+    analytics.sendFormViewed();
+
+    expect(capture).toHaveBeenCalledTimes(1);
+    expect(pendingEventCount()).toBe(0);
+  });
+});
+
+// ─── #853 payload verification ────────────────────────────────────────────────
+
+describe('payload verification', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    delete (window as unknown as { plausible?: unknown }).plausible;
+    clearPendingEvents();
+    vi.restoreAllMocks();
+  });
+
+  it('accepts a payload built by the module', () => {
+    expect(validatePayload(buildBasePayload('sender'))).toEqual([]);
+  });
+
+  it('reports every missing base-payload field', () => {
+    expect(validatePayload({})).toEqual(
+      expect.arrayContaining([
+        'missing §3.1 field "journey"',
+        'missing §3.1 field "timestamp"',
+        'missing §3.1 field "network"',
+      ]),
+    );
+  });
+
+  it('rejects a non-ISO timestamp', () => {
+    const payload = buildBasePayload('sender');
+    payload.timestamp = 'yesterday';
+    expect(validatePayload(payload)).toEqual(
+      expect.arrayContaining(['field "timestamp" is not an ISO 8601 date string']),
+    );
+  });
+
+  it('rejects a journey outside the spec vocabulary', () => {
+    const payload = buildBasePayload('sender');
+    payload.journey = 'Sender';
+    expect(validatePayload(payload)).toEqual(
+      expect.arrayContaining(['field "journey" is not one of sender | recipient | shared']),
+    );
+  });
+
+  it('accepts a null referrer, which the spec documents as its own value', () => {
+    const payload = buildBasePayload('sender');
+    payload.referrer = null;
+    expect(validatePayload(payload)).toEqual([]);
+  });
+
+  it('reports a wrongly-typed field', () => {
+    const payload = buildBasePayload('sender');
+    payload.device_type = 42;
+    expect(validatePayload(payload)).toEqual(
+      expect.arrayContaining(['field "device_type" should be string, got number']),
+    );
+  });
+
+  it('is off unless NEXT_PUBLIC_ANALYTICS_VERIFY is enabled', () => {
+    vi.stubEnv('NEXT_PUBLIC_ANALYTICS_VERIFY', 'false');
+    expect(isVerificationEnabled()).toBe(false);
+    vi.stubEnv('NEXT_PUBLIC_ANALYTICS_VERIFY', 'true');
+    expect(isVerificationEnabled()).toBe(true);
+  });
+
+  it('warns on the console about a malformed payload when enabled', () => {
+    vi.stubEnv('NEXT_PUBLIC_ANALYTICS_VERIFY', 'true');
+    window.plausible = plausibleMock();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    analytics.sendFormViewed();
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('docs/analytics-spec.md'),
+      expect.any(Array),
+    );
+  });
+
+  it('stays silent about a well-formed payload', () => {
+    vi.stubEnv('NEXT_PUBLIC_ANALYTICS_VERIFY', 'true');
+    window.plausible = plausibleMock();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    analytics.sendFormViewed();
+
+    expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+// ── Claim Link Shared (#784) ─────────────────────────────────────────────────
+//
+// Issue #784 asked for a `track('Claim Link Shared', …)` call at the point the
+// sender actively shares the claim link. The emitter and its WhatsApp call site
+// were already delivered by PR #751 (see
+// `bridgelet-product-audit/postmortems/issue-784-claim-link-shared-already-implemented.md`).
+// This block locks in the §4.4 payload so it cannot silently regress.
+describe('analytics.claimLinkShared (§4.4)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    delete (window as unknown as { plausible?: unknown }).plausible;
+  });
+
+  it.each(['sms', 'email', 'whatsapp', 'qr_code'] as const)(
+    'emits Claim Link Shared with share_method "%s"',
+    (shareMethod) => {
+      (window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible =
+        plausibleMock();
+
+      analytics.claimLinkShared({ claimId: 'acct_123', shareMethod });
+
+      const call = (window as unknown as { plausible: ReturnType<typeof plausibleMock> })
+        .plausible.mock.calls[0]!;
+      expect(call[0]).toBe('Claim Link Shared');
+      expect(call[1].props).toEqual(
+        expect.objectContaining({
+          journey: 'sender',
+          claim_id: 'acct_123',
+          share_method: shareMethod,
+        }),
+      );
+    },
+  );
 });
