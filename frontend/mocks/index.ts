@@ -30,3 +30,13 @@ export async function initMocks(): Promise<void> {
   const { worker } = await import('./browser');
   await worker.start({ onUnhandledRequest: 'bypass' });
 }
+
+export {
+  getRecordedEvents,
+  getRecordedEventNames,
+  getRecordedEventsByName,
+  initAnalyticsMock,
+  resetPlausibleMock,
+  uninstallPlausibleMock,
+  type RecordedEvent,
+} from './plausible';
