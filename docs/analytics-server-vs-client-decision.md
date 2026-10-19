@@ -7,6 +7,7 @@
 > Companions: `docs/analytics-kpi-readiness-audit.md` (#628, #624),
 > `docs/analytics-funnel-tracker.md`, and
 > `bridgelet-product-audit/integration-notes/analytics-events-vs-onchain-outcomes.md`.
+> Cross-referenced by #845 (frontend pointer added at `track()`).
 
 ## Status of this document
 
@@ -210,7 +211,7 @@ causes the event, and echoed by the server onto the emitted event:
 
 | Field | Source in this repo | Required? |
 |-------|--------------------|-----------|
-| `session_id` | `sessionStorage` via `getSessionId()` (`analytics.ts:123`); the 30-minute inactivity window in `lib/analytics-session.ts` is **not yet wired in** | Yes — §9.2 names it. Without it, server events cannot be attributed to a visit. |
+| `session_id` | `sessionStorage` via `getSessionId()` (`analytics.ts:274–287`); the 30-minute inactivity window in `lib/analytics-session.ts` is **wired in (#846)** | Yes — §9.2 names it. Without it, server events cannot be attributed to a visit. |
 | `device_type` | `detectDeviceType()` (`analytics.ts:51`), `mobile`/`tablet`/`desktop` | Yes — §9.2 names it. |
 | `anonymous_id` | `localStorage` via `getAnonymousId()` (`analytics.ts:102`) | Strongly recommended — it is the only identifier that stitches a server event to a sender's earlier client events across sessions. Without it, the sender funnel breaks at the first server-side step. |
 | `claim_id` | Account id on the sender, route token on the recipient | Required as the join key, and see the privacy note below. |

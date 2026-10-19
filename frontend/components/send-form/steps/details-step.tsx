@@ -1,10 +1,11 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { SendFormState } from '../index';
 import { ChainSelector } from '../../chain-selector';
 import { getXlmUsdRate, formatFiat } from '@/lib/xlm-price';
 import { isAssetAvailable, supportedAssetCodes } from '@/lib/bridgelet';
+import { analytics } from '@/lib/analytics';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -51,6 +52,13 @@ export function DetailsStep({ state, onChange, onBack, onNext }: DetailsStepProp
   // network; otherwise offer them disabled with an explanatory hint.
   const availableAssets = supportedAssetCodes();
   const usdcAvailable = isAssetAvailable('USDC');
+
+  const lastTrackedValues = useRef({
+    recipientName: state.recipientName,
+    amountXlm: state.amountXlm,
+    assetCode: state.assetCode,
+    memo: state.memo,
+  });
 
   useEffect(() => {
     let active = true;
@@ -101,6 +109,12 @@ export function DetailsStep({ state, onChange, onBack, onNext }: DetailsStepProp
           maxLength={100}
           value={state.recipientName}
           onChange={(e) => onChange({ recipientName: e.target.value })}
+          onBlur={(e) => {
+            if (e.target.value !== lastTrackedValues.current.recipientName) {
+              lastTrackedValues.current.recipientName = e.target.value;
+              analytics.sendFormFieldChanged({ fieldName: 'recipient_name' });
+            }
+          }}
           placeholder="e.g. Amina"
           className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-slate-500 focus:outline-none focus:ring-1 focus:ring-slate-500 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:placeholder-slate-500 dark:focus:border-slate-400 dark:focus:ring-slate-400"
         />
@@ -150,6 +164,12 @@ export function DetailsStep({ state, onChange, onBack, onNext }: DetailsStepProp
             step="any"
             value={state.amountXlm}
             onChange={(e) => onChange({ amountXlm: e.target.value })}
+            onBlur={(e) => {
+              if (e.target.value !== lastTrackedValues.current.amountXlm) {
+                lastTrackedValues.current.amountXlm = e.target.value;
+                analytics.sendFormFieldChanged({ fieldName: 'amount' });
+              }
+            }}
             placeholder="0.00"
             aria-invalid={errors.amountXlm ? true : undefined}
             aria-describedby={errors.amountXlm ? 'amount-error' : undefined}
@@ -163,7 +183,17 @@ export function DetailsStep({ state, onChange, onBack, onNext }: DetailsStepProp
             aria-label="Asset"
             required
             value={state.assetCode}
-            onChange={(e) => onChange({ assetCode: e.target.value })}
+            onChange={(e) => {
+              const newAsset = e.target.value;
+              onChange({ assetCode: newAsset });
+              if (newAsset !== lastTrackedValues.current.assetCode) {
+                lastTrackedValues.current.assetCode = newAsset;
+                analytics.sendFormFieldChanged({
+                  fieldName: 'asset',
+                  assetType: newAsset,
+                });
+              }
+            }}
             aria-invalid={errors.assetCode ? true : undefined}
             aria-describedby={errors.assetCode ? 'asset-error' : undefined}
             className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-slate-500 focus:outline-none focus:ring-1 focus:ring-slate-500 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:focus:border-slate-400 dark:focus:ring-slate-400"
@@ -218,6 +248,12 @@ export function DetailsStep({ state, onChange, onBack, onNext }: DetailsStepProp
           maxLength={28}
           value={state.memo}
           onChange={(e) => onChange({ memo: e.target.value })}
+          onBlur={(e) => {
+            if (e.target.value !== lastTrackedValues.current.memo) {
+              lastTrackedValues.current.memo = e.target.value;
+              analytics.sendFormFieldChanged({ fieldName: 'message' });
+            }
+          }}
           placeholder="e.g. Invoice #42"
           className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-slate-500 focus:outline-none focus:ring-1 focus:ring-slate-500 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:placeholder-slate-500 dark:focus:border-slate-400 dark:focus:ring-slate-400"
         />
