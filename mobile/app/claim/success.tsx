@@ -13,6 +13,7 @@ import {
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useThemeColors } from '../src/hooks/useThemeColors';
+import { useScreenTracking } from '../src/hooks/useScreenTracking';
 
 const readParam = (value: string | string[] | undefined, fallback = ''): string =>
   Array.isArray(value) ? (value[0] ?? fallback) : (value ?? fallback);
@@ -23,6 +24,8 @@ const summarizeMiddle = (value: string): string => {
 };
 
 export default function ClaimSuccessScreen() {
+  // §mobile analytics: record that this screen was opened.
+  useScreenTracking('claim_success');
   const router = useRouter();
   const colors = useThemeColors();
   const { amount, asset, accountId, txHash } = useLocalSearchParams();

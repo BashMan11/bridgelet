@@ -1,4 +1,5 @@
 import { apiClient } from '../../utils/apiClient';
+import { JOURNEYS, track } from '../../analytics/analytics';
 
 /**
  * Interface for language detection response
@@ -59,6 +60,18 @@ class LanguageDetectionServiceImpl {
       // Store last detected language
       if (result.confidence > MIN_CONFIDENCE_THRESHOLD) {
         this.lastDetectedLanguage = result.detectedLanguage;
+        // Only confident detections are recorded: below the threshold the app
+        // itself treats the result as unreliable, so reporting it would put
+        // noise into the language distribution. The input text is never sent.
+        track({
+          name: 'Language Detected',
+          params: {
+            journey: JOURNEYS.shared,
+            language: result.detectedLanguage,
+            detection_source: 'auto',
+            confidence: result.confidence,
+          },
+        });
       }
 
       return result;

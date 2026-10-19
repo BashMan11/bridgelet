@@ -21,45 +21,27 @@ Thanks for helping improve Bridgelet! Please read this guide before opening an i
 - Include tests or notes on why tests are not required.
 - Update documentation when behavior or APIs change.
 - Link related issues/discussions and describe the approach and rationale.
-- Adding or changing a tracked analytics event? Read the next section first.
+- If you add or change an analytics event or tracking call, update `docs/analytics-spec.md` first and follow the [analytics event runbook](./bridgelet-product-audit/runbooks/review-analytics-spec-before-new-event.md) — see [Adding or Modifying Analytics Events](#adding-or-modifying-analytics-events).
 
-## Adding or Modifying a Tracked Analytics Event
+## Adding or Modifying Analytics Events
 
-`docs/analytics-spec.md` is the contract for everything the apps report, and
-several parallel branches are instrumenting it right now. Read
-`bridgelet-product-audit/runbooks/review-analytics-spec-before-new-event.md`
-before you write the `track()` call — it exists because the spec and the code
-have already drifted once.
+Analytics events are specified before they are implemented. If your change adds
+or changes a tracking call, work through the process before opening the PR:
 
-The order that works:
+1. Read the [analytics specification](./docs/analytics-spec.md). Event names and
+   property keys must match it exactly, and it defines the privacy rules for
+   payloads.
+2. Run the pre-flight checklist in the
+   [analytics event runbook](./bridgelet-product-audit/runbooks/review-analytics-spec-before-new-event.md):
+   search for an existing event before adding one, confirm the `Noun Verb` name,
+   update the spec, and place the event in the correct journey section.
+3. Update the spec in the same pull request as the code, add the emitter to
+   `frontend/lib/analytics.ts`, and follow the
+   [analytics testing strategy](./TESTING.md#analytics-event-verification).
 
-1. **Check the spec first.** The event, its journey and its payload live in
-   `docs/analytics-spec.md` §4–§6. If the event is not there, that is the
-   first thing to change — an event in code but not in the spec is invisible
-   to the drift check in `.github/workflows/analytics-spec-diff.yml` and to
-   anyone reading the spec.
-2. **Change the spec and the code in the same PR.** A spec-only PR describes
-   behaviour nobody emits; a code-only PR ships behaviour nobody documented.
-3. **Name it the way the spec names it.** `Noun Verb` in Title Case, matching
-   the `#### \`Event Name\`` heading exactly. A snake_case name does not match
-   the CI drift check and will fail the build.
-4. **Route every event through the single `track()` dispatch point.** Opt-out
-   (§9.5), deduplication (§9.4) and the §3.1 base payload are enforced there;
-   an emitter that bypasses it silently loses all three.
-5. **Reuse the `conditional.*` helpers** for §3.2 properties rather than
-   re-typing snake_case keys.
-6. **Never send an identifier you would not want in a log**: no addresses, no
-   claim tokens, no message text. §5.2 states this for wallet addresses
-   explicitly.
-7. **Assert it fires.** `frontend/e2e/analytics.spec.ts` is the pattern — an
-   event with no test can be deleted by a later refactor without anything
-   failing.
-8. **Update `docs/analytics-kpi-definitions.md`** if the event is a KPI input
-   or unblocks one; its readiness table is the project's record of what may be
-   reported.
-
-A PR that adds a tracking call should tick the analytics box in the PR
-template.
+The runbook exists so a new event is a deliberate spec change rather than an
+ad-hoc string in a component; reviewers will ask for the spec update when a
+tracking call lands without one.
 
 ## Development Notes
 
