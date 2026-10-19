@@ -34,12 +34,28 @@
 
 ---
 
+Per-event readiness — which of these events actually fire from production code
+— is tracked in `docs/analytics-kpi-definitions.md`. A dashboard built from
+this document alone will contain zeros.
+
+> **Spec versioning.** This document is versioned (`**Version:**` above) and
+> the version is reported as the §3.1 base-payload field
+> `analytics_spec_version`. Every behaviour change — event added, renamed,
+> removed, or payload altered — bumps the version and adds a row to the table
+> below. Without this, a payload collected under an earlier revision is
+> indistinguishable from one collected after a rename, and a historical series
+> cannot be reinterpreted correctly.
+
+| Spec version | Change |
+| --- | --- |
+| 1.0 | Initial document |
+
 ## 1. Overview
 
 This document defines the analytics and product event tracking specification for Bridgelet — a crypto onboarding solution that allows senders to create claimable crypto links for recipients who do not yet have wallets.
 
 The purpose of this spec is to:
-- Define every trackable user interaction across both journeys
+- Define every trackable user interaction across both sender and recipient journeys
 - Establish a consistent naming and payload convention
 - Provide funnel definitions for measuring conversion
 - Define business KPIs and how they are derived
@@ -157,6 +173,12 @@ Every event includes a **base payload** of common properties. Event-specific pro
 }
 ```
 
+> **`analytics_spec_version` is what makes the rest of this document auditable.**
+> It travels with every event so that a payload can always be read against the
+> revision of this spec that was in force when it was collected. Rename a
+> field or change an event's shape without it, and the affected historical data
+> becomes uninterpretable rather than merely differently-shaped.
+
 > **Privacy note:** No PII (name, email, phone) should ever appear in an analytics payload. Wallet addresses are pseudonymous — include them only where explicitly specified below. Recipient wallet addresses must never be logged in sender-journey events.
 
 ### 3.2 Conditional Properties
@@ -224,6 +246,14 @@ Fired on the sender's first interaction with any field in the Create Claim form.
 #### `Send Form Field Changed`
 
 Fired when the sender changes a field value and moves focus away (blur). Not fired on every keystroke.
+
+> **Volume rule — do not implement this on `onChange`.** A single busy sender
+> can generate hundreds of keystroke events across five fields, and this event
+> is the highest-volume one in the catalog. Fire it on **blur only**, and only
+> when the committed value differs from the value at the previous blur (so
+> re-focusing a field without editing it emits nothing). Per §9's sampling
+> policy this event is a candidate for sampling; `Send Form Completed` and
+> everything downstream of it never are.
 
 | Property | Type | Value / Description |
 |----------|------|---------------------|
@@ -306,6 +336,20 @@ Definitions of the three paths, and how `generated` relates to the custodial fun
 ---
 
 #### `Payment Confirmed`
+
+> **⚠️ Naming trap — "Confirmed" means the user, not the chain.**
+> This event fires when the sender **signs**, before any on-chain settlement.
+> It does not mean the payment succeeded. A payment that is signed and then
+> fails on-chain produces `Payment Confirmed` with **no** `Payment Created`.
+> Any metric counting `Payment Confirmed` as a successful payment will
+> **overcount**. The rule, stated once so it cannot be missed:
+>
+> **A successful payment is `Payment Created`. Never `Payment Confirmed`.**
+>
+> The name is kept as-is rather than renamed because it has already shipped to
+> existing dashboards, and renaming an emitted event silently splits a metric
+> in two. If it is ever renamed, treat it as a breaking change requiring a
+> spec-version bump and a dual-emission window.
 
 Fired when the sender clicks "Confirm & Pay" and signs the transaction. This indicates user intent; it fires *before* blockchain confirmation.
 
@@ -876,6 +920,13 @@ Claim Link Shared        ← activation milestone
 | 4 | `Wallet Connected` | % who connect wallet on confirm screen |
 | 5 | `Payment Confirmed` | % who sign the transaction |
 | 6 | `Payment Created` | % confirmed → on-chain success |
+
+> **Acceptance criterion for any dashboard built on this funnel:** define
+> "successful payment" as `Payment Created`. `Payment Confirmed` is intent and
+> must never appear in a success count, a revenue total or a conversion
+> numerator — a signed-then-failed payment fires `Payment Confirmed` and no
+> `Payment Created`, so counting it as a success overcounts by exactly the
+> on-chain failure rate. See §4.3 `Payment Confirmed` for the full note.
 | 7 | `Claim Link Shared` | % who actively share (vs. just copy) |
 
 #### Funnel Drop-off & Partial Abandonment Measurement Methodology
@@ -1168,6 +1219,31 @@ Where server-side events are used, they should be enriched with client context (
 ### 9.5 Do Not Track
 
 Respect browser-level `DNT` headers. If `DNT: 1`, suppress all analytics events. This is especially important for the recipient flow, where the user may not have any prior relationship with Bridgelet.
+
+### 9.6 Sampling Policy
+
+Events are split into two classes, and the split is by role in a KPI rather
+than by volume.
+
+**Never sampled — anything that feeds a KPI numerator or denominator.**
+`Page Viewed`, `Claim Page Opened`, `Claim Verified`, `Send Form Started`,
+`Send Form Completed`, `Wallet Connected`, `Payment Confirmed`,
+`Payment Created`, `Claim Submitted`, `Claim Succeeded`, `Claim Failed`,
+`Funds Reclaimed`, `Sender Signup CTA Clicked`, and every §10 mobile-only
+event. A sampled conversion rate is not a conversion rate; it is a rate with
+an unquantified bias, and the bias is not uniform across segments, which is
+what makes it misleading rather than merely imprecise.
+
+**Sampling permitted under load — diagnostics only.** `Send Form Field
+Changed`, `Wallet Address Validation Failed`, `Error Displayed` on the inline
+address-validation path, and `Explorer Link Clicked`. These describe *how* a
+flow felt, not *whether* it converted, so a sampled view of them is acceptable
+as long as the sampling rate is recorded alongside the number. If any of these
+is later promoted to a KPI input, it joins the never-sampled class.
+
+**Applying a rate.** Sample at the emitter or the provider, never in the
+query — a query-time sample hides the loss from anyone reading the query. The
+rate applied must be written next to any chart built on a sampled event.
 
 ---
 
