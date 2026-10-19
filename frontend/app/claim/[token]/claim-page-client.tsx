@@ -7,9 +7,11 @@ import { BridgeletClient } from '@/lib/api/client';
 import { ClaimView, loadClaimView, markTokenClaimed } from '@/lib/claim-view';
 import { submitClaimWithRetry, pollClaimStatus } from '@/lib/claim-retry';
 import { ClaimError, claimErrorCodeFromApiCode, getClaimErrorMessage } from '@/lib/claim-errors';
+import { validateClaimToken } from '@/lib/validate-token';
 import {
   analytics,
   daysRemainingUntil,
+  ERROR_TYPES,
   toAmountUsdEquiv,
   type ClaimEntryChannel,
 } from '@/lib/analytics';
@@ -34,9 +36,14 @@ function claimEntryChannel(): ClaimEntryChannel {
     const params = new URLSearchParams(window.location.search);
     const flagged = (params.get('channel') ?? params.get('src') ?? params.get('utm_source') ?? '')
       .toLowerCase();
+    if (flagged.includes('qr')) return 'qr_scan';
     if (flagged.includes('whatsapp') || flagged.includes('wa')) return 'whatsapp';
     if (flagged.includes('mail') || flagged.includes('email')) return 'email';
     if (flagged.includes('sms') || flagged.includes('text')) return 'sms';
+    // Opened via the app's custom scheme (bridgelet://claim/<token>), which is
+    // a different acquisition path from a pasted https link.
+    const protocol = window.location.protocol.toLowerCase();
+    if (protocol !== '' && protocol !== 'http:' && protocol !== 'https:') return 'deep_link';
     const referrer = document.referrer;
     if (referrer) {
       const host = new URL(referrer).hostname.toLowerCase();
@@ -99,6 +106,24 @@ export function ClaimPageClient({ token, supportEmail, initialView }: ClaimPageC
   useEffect(() => {
     // Funnel start: fire immediately on open, before token verification.
     analytics.claimPageOpened({ claimId: token, entryChannel: claimEntryChannel() });
+
+    // §6 `invalid_token` — a token that cannot be a token is classified
+    // before any request is made. Previously a malformed link reached the API,
+    // came back 401, and was reported as `expired_token`, so every corrupt or
+    // mistyped link inflated the expiry numbers with what was really a
+    // bad-URL problem.
+    const tokenCheck = validateClaimToken(token);
+    if (!tokenCheck.valid) {
+      analytics.errorDisplayed({
+        journey: 'recipient',
+        claimId: token,
+        errorType: ERROR_TYPES.invalid_token,
+        errorCode: 'TOKEN_MALFORMED',
+        sourceScreen: 'claim_landing',
+      });
+      setView({ status: AccountStatus.FAILED, loadErrorCode: 'TOKEN_MALFORMED' });
+      return;
+    }
 
     let cancelled = false;
     const verifiedAt = Date.now();
@@ -258,6 +283,17 @@ export function ClaimPageClient({ token, supportEmail, initialView }: ClaimPageC
           case "alreadyClaimed": {
             // Token was already claimed (possibly by this session earlier).
             markTokenClaimed(token);
+            // §6 already_claimed — the recipient submitted a claim for a
+            // payment that had already been swept. Distinct from the same
+            // status discovered on page load, which the load path reports with
+            // source_screen 'claim_landing'.
+            analytics.errorDisplayed({
+              journey: 'recipient',
+              claimId: token,
+              errorType: ERROR_TYPES.already_claimed,
+              errorCode: 'ALREADY_CLAIMED',
+              sourceScreen: 'claim_result',
+            });
             setView((prev) => ({
               ...(prev ?? { status: AccountStatus.CLAIMED }),
               status: AccountStatus.CLAIMED,
@@ -396,6 +432,23 @@ export function ClaimPageClient({ token, supportEmail, initialView }: ClaimPageC
               pollResult.status === AccountStatus.FAILED ||
               pollResult.status === AccountStatus.EXPIRED
             ) {
+              // The claim window elapsed (or the payment failed) while the
+              // recipient waited on an ambiguous submission. Previously the
+              // panel just swapped to the expired state with no event, so an
+              // expiry discovered here was invisible.
+              analytics.errorDisplayed({
+                journey: 'recipient',
+                claimId: token,
+                errorType:
+                  pollResult.status === AccountStatus.EXPIRED
+                    ? ERROR_TYPES.expired_token
+                    : ERROR_TYPES.unknown,
+                errorCode:
+                  pollResult.status === AccountStatus.EXPIRED
+                    ? 'TOKEN_EXPIRED'
+                    : 'CLAIM_SETTLEMENT_FAILED',
+                sourceScreen: 'claim_result',
+              });
               setView((prev) => ({
                 ...(prev ?? { status: AccountStatus.FAILED }),
                 status: pollResult.status,

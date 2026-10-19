@@ -604,6 +604,36 @@ Fired immediately when a recipient opens a claim link. Fires before token verifi
 |----------|------|---------------------|
 | `journey` | string | `"recipient"` |
 | `claim_id` | string | Extracted from URL token |
+| `entry_channel` | string | How the recipient arrived: `"sms"`, `"email"`, `"whatsapp"`, `"qr_scan"`, `"deep_link"`, `"direct"`, `"unknown"` |
+| `is_returning_visit` | boolean | Whether this browser had already opened a claim link before |
+
+**`entry_channel` values.** `qr_scan` is mobile-only and is set when the QR
+scanner tags the destination URL with a channel parameter. `deep_link` means
+the link was opened through the app scheme (`bridgelet://claim/<token>`) rather
+than a pasted or shared https URL. Both are separate acquisition channels for
+§8.2's Recipient Entry Channel Distribution and neither may be folded into
+`direct`. `direct` therefore means "an https claim link with no referral signal",
+and `unknown` means the channel could not be determined (no `document.referrer`
+and no parameters).
+
+**`is_returning_visit` is browser-scoped, not per-claim.** It is `true` when the
+same browser has opened *any* claim link before. It is deliberately not
+per-claim-id: answering "is this recipient deciding over several days?" does not
+require knowing which claim they came back to, and persisting claim tokens to
+`localStorage` would store bearer credentials for real money — see
+`bridgelet-product-audit/checklists/localstorage-data-exposure-checklist.md`.
+A recipient opening two different links from one device reports `true` on the
+second; that is the accepted trade-off for keeping identifiers out of storage.
+
+**Repeat opens are not deduplicated.** A refresh, a re-open from history, or a
+React development-mode double mount each produce their own event, so the event
+count is the number of *opens*, not the number of unique recipients — use
+`is_returning_visit` and `anonymous_id` for the latter. Each event carries a
+distinct `message_id` (§3.1), so the pipeline can deduplicate if a consumer
+needs opens-per-session instead. This is a deliberate decision for this event
+specifically rather than a gap in §9.4: a second open of the same link usually
+represents a real decision, not an accident.
+
 | `entry_channel` | string | Best-guess referral channel: `"sms"`, `"email"`, `"whatsapp"`, `"direct"`, `"qr_scan"`, `"unknown"` |
 | `is_returning_visit` | boolean | `false` on the first `Claim Page Opened` recorded for this `anonymous_id`; `true` when the same `anonymous_id` has already fired `Claim Page Opened` before (any claim link) |
 
@@ -643,6 +673,29 @@ Fired when the backend confirms the claim token is valid and the funds are avail
 **Correspondence with the backend**
 
 This event corresponds to an HTTP 200 from bridgelet-sdk `POST /claims/verify`, which `ClaimsController` hands to `TokenVerificationProvider.verifyClaimToken`. That provider throws for every non-success case, so a 200 always carries `valid: true`. There is no "verified but invalid" outcome, and `Claim Verified` never fires for a rejection.
+
+**Rejection side, and which §6 `error_type` it produces.** Every non-200
+outcome is reported as `Error Displayed` rather than `Claim Verified`, and the
+backend status alone is not always enough to tell the failures apart — §6's
+vocabulary is finer-grained than HTTP. The mapping an emitter must apply:
+
+| Condition | Source | `error_type` | `error_code` |
+|---|---|---|---|
+| Token fails the client-side format check | client, before any request | `invalid_token` | `TOKEN_MALFORMED` |
+| No matching claim record (404) | backend | `invalid_token` | `TOKEN_NOT_FOUND` |
+| Token past its expiry (401 / `EXPIRED`) | backend | `expired_token` | `TOKEN_EXPIRED` |
+| Funds already swept (409 / `CLAIMED`) | backend, or after a submit | `already_claimed` | `ALREADY_CLAIMED` |
+| Submitted address fails validation | client | `invalid_wallet_address` | `INVALID_ADDRESS_<reason>` |
+| Sweep rejected on-chain, or destination not funded | backend | `transaction_failed` | backend code, else status |
+| API or Stellar network unreachable | network | `network_unavailable` | `API_UNREACHABLE` |
+
+A token that cannot be a token is classified **client-side, before the request**:
+without that check a mistyped link reaches the API, comes back 401, and is
+reported as `expired_token`, so corrupt URLs inflate the expiry numbers. The
+`source_screen` value distinguishes where a given failure was discovered —
+`claim_landing` for page load, `claim_result` for the result of an action the
+recipient took — so the same `error_type` is not double-counted when both
+describe the same visit.
 
 The 200 body (`ClaimVerificationResponseDto`) has five fields. Build the payload from them rather than re-deriving values elsewhere:
 
@@ -848,6 +901,23 @@ Rules:
 - Testnet and mainnet explorers differ. `network` is recorded explicitly rather than inferred, because the same `tx_hash` shape appears on both networks and a dashboard that assumes one will silently mix them.
 - Never build `tx_hash` from an unvalidated URL segment. Read it from the link target that was actually rendered, so a forged URL cannot inject an arbitrary value into the payload.
 
+| `explorer` | string | Explorer the link pointed at: `"stellar_expert"` (mainnet), `"stellar_expert_testnet"` (testnet) |
+| `tx_hash` | string | The transaction the link pointed at. **Omitted when the frontend has no transaction hash** |
+
+`explorer` is recorded because the explorer instance differs by network —
+testnet and mainnet transactions are not on the same instance — so a click
+cannot be attributed to a transaction from the click alone.
+
+`tx_hash` is omitted rather than sent as `null` or an empty string when no
+hash is available. Omission means "this click could not be attributed to a
+transaction"; an empty value would mean the hash was known and empty. A
+transaction URL takes a transaction hash and nothing else: a claim id or an
+account id in that path does not resolve, and on the claim page the token is a
+bearer credential for the funds, so it must never be placed in a third-party
+URL (see `docs/security-model.mdx`, T-16). Emitters must therefore render no
+explorer link at all when no hash exists rather than substituting another
+identifier.
+
 ---
 
 ## 6. Error & Edge Case Events
@@ -892,7 +962,14 @@ Fired when a user clicks a "Try Again" or "Retry" button on an error screen.
 | `journey` | string | `"sender"` or `"recipient"` |
 | `claim_id` | string \| null | |
 | `error_type` | string | Error type that triggered the retry prompt |
+| `error_code` | string | §3.2 machine-readable code of the error being retried, or `"unknown"` |
 | `attempt_number` | number | Which retry attempt this is |
+
+`error_type` and `error_code` describe the error that *prompted* the retry, not
+a generic failure. A retry offered after a rate limit and a retry offered after
+a rejected sweep are different signals about where the flow is fragile, and
+collapsing both into `unknown` discards the only thing the event carries.
+
 
 ---
 

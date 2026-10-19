@@ -4,6 +4,7 @@ import {
   ANALYTICS_NETWORKS,
   appVersion,
   buildBasePayload,
+  CLAIM_ENTRY_CHANNELS,
   CLAIM_FAILED_ERROR_TYPES,
   clearPendingEvents,
   conditional,
@@ -34,11 +35,13 @@ import {
   type ClaimFailedErrorType,
   type ExplorerJourney,
   type ExplorerSourceScreen,
+  isReturningClaimVisitor,
   type SendFormFieldName,
   VALID_EXPIRY_WINDOWS,
   validatePayload,
   type ValidationError,
 } from '@/lib/analytics';
+import { explorerName, explorerTxUrl } from '@/lib/stellar-explorer';
 
 function plausibleMock() {
   return vi.fn();
@@ -2433,4 +2436,234 @@ describe('analytics.claimLinkShared (§4.4)', () => {
       );
     },
   );
+});
+
+
+describe('CLAIM_ENTRY_CHANNELS', () => {
+  it('keeps qr_scan and deep_link as distinct channels', () => {
+    expect(CLAIM_ENTRY_CHANNELS).toEqual([
+      'sms',
+      'email',
+      'whatsapp',
+      'qr_scan',
+      'deep_link',
+      'direct',
+      'unknown',
+    ]);
+  });
+});
+
+describe('isReturningClaimVisitor', () => {
+  afterEach(() => {
+    localStorage.removeItem('bridgelet_claim_opens');
+  });
+
+  it('reports a first visit when no claim link has been opened before', () => {
+    expect(isReturningClaimVisitor()).toBe(false);
+  });
+
+  it('reports a returning visit on the second open', () => {
+    isReturningClaimVisitor();
+    expect(isReturningClaimVisitor()).toBe(true);
+  });
+
+  it('never writes a claim token to storage', () => {
+    isReturningClaimVisitor();
+    const stored = JSON.stringify(localStorage);
+    expect(stored).not.toContain('tok_');
+    expect(stored).not.toContain('GABC');
+  });
+
+  it('survives corrupt stored state', () => {
+    localStorage.setItem('bridgelet_claim_opens', 'not-a-number');
+    expect(isReturningClaimVisitor()).toBe(false);
+  });
+
+  it('is attached to Claim Page Opened', () => {
+    const plausible = plausibleMock();
+    (window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible = plausible;
+
+    analytics.claimPageOpened({ claimId: 'tok_1', entryChannel: 'qr_scan' });
+
+    expect(plausible.mock.calls[0]![1]).toEqual(
+      expect.objectContaining({
+        props: expect.objectContaining({ entry_channel: 'qr_scan', is_returning_visit: false }),
+      }),
+    );
+  });
+
+  it('accepts an explicit value for testability', () => {
+    const plausible = plausibleMock();
+    (window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible = plausible;
+
+    analytics.claimPageOpened({
+      claimId: 'tok_1',
+      entryChannel: 'direct',
+      isReturningVisit: true,
+    });
+
+    expect(plausible.mock.calls[0]![1]).toEqual(
+      expect.objectContaining({ props: expect.objectContaining({ is_returning_visit: true }) }),
+    );
+  });
+});
+
+describe('wallet address events', () => {
+  afterEach(() => {
+    delete (window as unknown as { plausible?: unknown }).plausible;
+  });
+
+  it('reports the address screen with has_previous_address', () => {
+    const plausible = plausibleMock();
+    (window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible = plausible;
+
+    analytics.walletAddressScreenViewed({ claimId: 'claim_1', hasPreviousAddress: false });
+
+    expect(plausible.mock.calls[0]![0]).toBe('Wallet Address Screen Viewed');
+    expect(plausible.mock.calls[0]![1]).toEqual(
+      expect.objectContaining({
+        props: expect.objectContaining({
+          journey: 'recipient',
+          claim_id: 'claim_1',
+          has_previous_address: false,
+        }),
+      }),
+    );
+  });
+
+  it('defaults has_previous_address to false when the caller does not know', () => {
+    const plausible = plausibleMock();
+    (window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible = plausible;
+
+    analytics.walletAddressScreenViewed({ claimId: 'claim_1' });
+
+    expect(plausible.mock.calls[0]![1]).toEqual(
+      expect.objectContaining({ props: expect.objectContaining({ has_previous_address: false }) }),
+    );
+  });
+
+  it('reports an entered address without ever including the address itself', () => {
+    const plausible = plausibleMock();
+    (window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible = plausible;
+
+    analytics.walletAddressEntered({ claimId: 'claim_1', usedPreviousAddress: false });
+
+    expect(plausible.mock.calls[0]![0]).toBe('Wallet Address Entered');
+    const props = (plausible.mock.calls[0]![1] as { props: Record<string, unknown> }).props;
+    expect(props).toEqual(
+      expect.objectContaining({
+        claim_id: 'claim_1',
+        used_previous_address: false,
+      }),
+    );
+    expect(JSON.stringify(props)).not.toMatch(/G[A-Z2-7]{55}/);
+  });
+});
+
+describe('explorerTxUrl', () => {
+  it('builds a mainnet transaction URL', () => {
+    const hash = 'a'.repeat(64);
+    expect(explorerTxUrl('mainnet', hash)).toBe(
+      `https://stellar.expert/explorer/public/tx/${hash}`,
+    );
+  });
+
+  it('builds a testnet transaction URL', () => {
+    const hash = 'b'.repeat(64);
+    expect(explorerTxUrl('testnet', hash)).toBe(
+      `https://stellar.expert/explorer/testnet/tx/${hash}`,
+    );
+  });
+
+  it('refuses anything that is not a transaction hash', () => {
+    expect(explorerTxUrl('testnet', 'tok_abc123')).toBeNull();
+    expect(explorerTxUrl('testnet', 'G' + 'A'.repeat(55))).toBeNull();
+    expect(explorerTxUrl('testnet', '')).toBeNull();
+    expect(explorerTxUrl('testnet', null)).toBeNull();
+    expect(explorerTxUrl('testnet', undefined)).toBeNull();
+  });
+
+  it('normalises case and surrounding whitespace', () => {
+    const hash = 'F'.repeat(64);
+    expect(explorerTxUrl('testnet', `  ${hash}  `)).toBe(
+      `https://stellar.expert/explorer/testnet/tx/${hash.toLowerCase()}`,
+    );
+  });
+
+  it('names the explorer per network for the analytics property', () => {
+    expect(explorerName('mainnet')).toBe('stellar_expert');
+    expect(explorerName('testnet')).toBe('stellar_expert_testnet');
+  });
+
+  it('adds explorer and omits tx_hash when no hash is known', () => {
+    const plausible = plausibleMock();
+    (window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible = plausible;
+
+    analytics.explorerLinkClicked({
+      journey: 'recipient',
+      claimId: 'claim_1',
+      sourceScreen: 'claim_success',
+    });
+
+    const props = (plausible.mock.calls[0]![1] as { props: Record<string, unknown> }).props;
+    expect(props.explorer).toBe('stellar_expert');
+    expect('tx_hash' in props).toBe(false);
+  });
+
+  it('carries tx_hash when the emitter knows it', () => {
+    const plausible = plausibleMock();
+    (window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible = plausible;
+    const hash = 'c'.repeat(64);
+
+    analytics.explorerLinkClicked({
+      journey: 'recipient',
+      claimId: 'claim_1',
+      sourceScreen: 'claim_success',
+      txHash: hash,
+    });
+
+    expect(plausible.mock.calls[0]![1]).toEqual(
+      expect.objectContaining({ props: expect.objectContaining({ tx_hash: hash }) }),
+    );
+  });
+});
+
+describe('retryClicked carries the originating error', () => {
+  afterEach(() => {
+    delete (window as unknown as { plausible?: unknown }).plausible;
+  });
+
+  it('reports error_type and error_code of the error being retried', () => {
+    const plausible = plausibleMock();
+    (window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible = plausible;
+
+    analytics.retryClicked({
+      journey: 'recipient',
+      claimId: 'claim_1',
+      errorType: 'network_unavailable',
+      errorCode: 'SUBMISSION_FAILED_RETRYABLE',
+      attemptNumber: 2,
+    });
+
+    expect(plausible.mock.calls[0]![1]).toEqual(
+      expect.objectContaining({
+        props: expect.objectContaining({
+          error_type: 'network_unavailable',
+          error_code: 'SUBMISSION_FAILED_RETRYABLE',
+          attempt_number: 2,
+        }),
+      }),
+    );
+  });
+
+  it('defaults error_code to unknown rather than omitting it', () => {
+    const plausible = plausibleMock();
+    (window as unknown as { plausible?: ReturnType<typeof plausibleMock> }).plausible = plausible;
+
+    analytics.retryClicked({ journey: 'recipient', errorType: 'unknown', attemptNumber: 1 });
+
+    expect(plausible.mock.calls[0]![1]).toEqual(
+      expect.objectContaining({ props: expect.objectContaining({ error_code: 'unknown' }) }),
+    );
+  });
 });
